@@ -220,6 +220,8 @@ public:
 	int LOAD_BALANCE_MAX_BAD_OPTIONS;
 	bool LOAD_BALANCE_PENALTY_IS_BAD;
 
+	bool USE_NETWORK_CHECKSUM;
+
 	FlowKnobs(bool randomize = false, bool isSimulated = false);
 };
 

@@ -793,7 +793,7 @@ static void scanPackets(TransportData* transport,
 	// There won't be more than 64K of data plus one packet, so this shouldn't take a long time.
 	uint8_t* p = unprocessed_begin;
 
-	const bool checksumEnabled = !peerAddress.isTLS();
+	const bool checksumEnabled = FLOW_KNOBS->USE_NETWORK_CHECKSUM && !peerAddress.isTLS();
 	loop {
 		uint32_t packetLen, packetChecksum;
 
@@ -1335,7 +1335,7 @@ static ReliablePacket* sendPacket(TransportData* self,
                                   ISerializeSource const& what,
                                   const Endpoint& destination,
                                   bool reliable) {
-	const bool checksumEnabled = !destination.getPrimaryAddress().isTLS();
+	const bool checksumEnabled = FLOW_KNOBS->USE_NETWORK_CHECKSUM && !destination.getPrimaryAddress().isTLS();
 	++self->countPacketsGenerated;
 
 	// If there isn't an open connection, a public address, or the peer isn't compatible, we can't send
