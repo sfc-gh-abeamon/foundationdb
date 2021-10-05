@@ -2168,25 +2168,30 @@ ACTOR Future<Void> submitDBMove(Database src,
                                 Key addPrefix,
                                 Key removePrefix) {
 	try {
-		state DatabaseBackupAgent backupAgent(src);
-		wait(backupAgent.submitBackup(
-		    dest, KeyRef(tagName), backupRanges, StopWhenDone::False, addPrefix, removePrefix, LockDB::False));
+		MoveTenantToClusterRequest srcRequest(removePrefix, addPrefix);
+		ReceiveTenantFromClusterRequest destRequest(removePrefix, addPrefix);
 
-		// Check if a backup agent is running
-		bool agentRunning = wait(backupAgent.checkActive(dest));
+		state ErrorOr<MoveTenantToClusterReply> moveTenantToClusterReply =
+		    wait(src->getTenantBalancer()->moveTenantToCluster.tryGetReply(srcRequest));
+		state ErrorOr<ReceiveTenantFromClusterReply> receiveTenantFromClusterReply =
+		    wait(dest->getTenantBalancer()->receiveTenantFromCluster.tryGetReply(destRequest));
 
-		if (!agentRunning) {
-			printf("The data movement on tag `%s' was successfully submitted but no DR agents are responding.\n",
-			       printable(StringRef(tagName)).c_str());
+		// state DatabaseBackupAgent backupAgent(src);
+		// wait(backupAgent.submitBackup(
+		//     dest, KeyRef(tagName), backupRanges, StopWhenDone::False, addPrefix, removePrefix, LockDB::False));
 
-			// Throw an error that will not display any additional information
-			throw actor_cancelled();
-		}
-		printf("The data movement on tag `%s' was successfully submitted.\n", printable(StringRef(tagName)).c_str());
-	}
+		// // Check if a backup agent is running
+		// bool agentRunning = wait(backupAgent.checkActive(dest));
 
-	// TODO: think about 1. do we need these tags here? 2. If so, we might need data movement specified tag
-	catch (Error& e) {
+		// if (!agentRunning) {
+		// 	printf("The data movement on tag `%s' was successfully submitted but no DR agents are responding.\n",
+		// 	       printable(StringRef(tagName)).c_str());
+
+		// 	// Throw an error that will not display any additional information
+		// 	throw actor_cancelled();
+		// }
+		// printf("The data movement on tag `%s' was successfully submitted.\n", printable(StringRef(tagName)).c_str());
+	} catch (Error& e) {
 		if (e.code() == error_code_actor_cancelled)
 			throw;
 		switch (e.code()) {
@@ -2217,16 +2222,23 @@ ACTOR Future<Void> statusDBMove(Database src,
                                 KeyRef srcPrefix,
                                 bool json = false) {
 	try {
-		state DatabaseBackupAgent backupAgent(src);
-		state DatabaseBackupStatus backUpStatus = wait(backupAgent.getStatusData(dest, errorLimit, StringRef(tagName)));
+		// TODO do we need to specify dest, prefixes, isJson, etc...?
+		GetActiveMovementsRequest getActiveMovementsRequest;
+		state ErrorOr<GetActiveMovementsReply> getActiveMovementsReply =
+		    wait(src->getTenantBalancer()->getActiveMovements.tryGetReply(getActiveMovementsRequest));
+		// TODO print status plain text or json
 
-		backUpStatus.srcClusterFile = src->getConnectionFile()->getFilename();
-		backUpStatus.destClusterFile = dest->getConnectionFile()->getFilename();
-		backUpStatus.srcPrefix = srcPrefix.size() ? srcPrefix : KeyRef("`not specified`");
-		backUpStatus.destPrefix = destPrefix.size() ? destPrefix : KeyRef("`not specified`");
+		// state DatabaseBackupAgent backupAgent(src);
+		// state DatabaseBackupStatus backUpStatus = wait(backupAgent.getStatusData(dest, errorLimit,
+		// StringRef(tagName)));
 
-		std::string statusText = json ? backUpStatus.toJson() : backUpStatus.toString();
-		printf("%s\n", statusText.c_str());
+		// backUpStatus.srcClusterFile = src->getConnectionFile()->getFilename();
+		// backUpStatus.destClusterFile = dest->getConnectionFile()->getFilename();
+		// backUpStatus.srcPrefix = srcPrefix.size() ? srcPrefix : KeyRef("`not specified`");
+		// backUpStatus.destPrefix = destPrefix.size() ? destPrefix : KeyRef("`not specified`");
+
+		// std::string statusText = json ? backUpStatus.toJson() : backUpStatus.toString();
+		// printf("%s\n", statusText.c_str());
 	} catch (Error& e) {
 		if (e.code() == error_code_actor_cancelled)
 			throw;
@@ -2239,23 +2251,29 @@ ACTOR Future<Void> statusDBMove(Database src,
 
 ACTOR Future<Void> finishDBMove(Database src,
                                 Database dest,
+                                Key srcPrefix,
+                                Key destPrefix,
                                 Standalone<VectorRef<KeyRangeRef>> backupRanges,
                                 std::string tagName,
                                 ForceAction forceAction) {
 	try {
-		state DatabaseBackupAgent backupAgent(src);
+		FinishSourceMovementRequest finishSourceMovementRequest(srcPrefix.toString());
+		state ErrorOr<FinishSourceMovementReply> finishSourceMovementReply =
+		    wait(src->getTenantBalancer()->finishSourceMovement.tryGetReply(finishSourceMovementRequest));
 
-		// Backup everything, if no ranges were specified
-		if (backupRanges.size() == 0) {
-			backupRanges.push_back_deep(backupRanges.arena(), normalKeys);
-		}
+		Version version = finishSourceMovementReply.get().version;
+		FinishDestinationMovementRequest finishDestinationMovementRequest(destPrefix.toString(), version);
+		wait(dest->getTenantBalancer()->finishDestinationMovement.tryGetReply(finishDestinationMovementRequest));
 
-		wait(backupAgent.atomicSwitchover(
-		    dest, KeyRef(tagName), backupRanges, StringRef(), StringRef(), forceAction, false));
-		printf("The data movement on tag `%s' was successfully switched.\n", printable(StringRef(tagName)).c_str());
-	}
-
-	catch (Error& e) {
+		// state DatabaseBackupAgent backupAgent(src);
+		// // Backup everything, if no ranges were specified
+		// if (backupRanges.size() == 0) {
+		// 	backupRanges.push_back_deep(backupRanges.arena(), normalKeys);
+		// }
+		// wait(backupAgent.atomicSwitchover(
+		//     dest, KeyRef(tagName), backupRanges, StringRef(), StringRef(), forceAction, false));
+		// printf("The data movement on tag `%s' was successfully switched.\n", printable(StringRef(tagName)).c_str());
+	} catch (Error& e) {
 		if (e.code() == error_code_actor_cancelled)
 			throw;
 		switch (e.code()) {
@@ -4853,7 +4871,8 @@ int main(int argc, char* argv[]) {
 				if (!initCluster() || !initSourceCluster(true)) {
 					return FDB_EXIT_ERROR;
 				}
-				f = stopAfter(finishDBMove(sourceDb, db, backupKeys, tagName, forceAction));
+				f = stopAfter(
+				    finishDBMove(sourceDb, db, Key(removePrefix), Key(addPrefix), backupKeys, tagName, forceAction));
 				break;
 			case DBMoveType::ABORT:
 				if (!initCluster() || !initSourceCluster(true)) {
