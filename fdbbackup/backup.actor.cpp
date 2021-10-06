@@ -2168,13 +2168,13 @@ ACTOR Future<Void> submitDBMove(Database src,
                                 Key addPrefix,
                                 Key removePrefix) {
 	try {
-		MoveTenantToClusterRequest srcRequest(removePrefix, addPrefix);
-		ReceiveTenantFromClusterRequest destRequest(removePrefix, addPrefix);
-
-		state ErrorOr<MoveTenantToClusterReply> moveTenantToClusterReply =
-		    wait(src->getTenantBalancer()->moveTenantToCluster.tryGetReply(srcRequest));
+		state ReceiveTenantFromClusterRequest destRequest(removePrefix, addPrefix);
 		state ErrorOr<ReceiveTenantFromClusterReply> receiveTenantFromClusterReply =
 		    wait(dest->getTenantBalancer()->receiveTenantFromCluster.tryGetReply(destRequest));
+		
+		state MoveTenantToClusterRequest srcRequest(removePrefix, addPrefix);
+		state ErrorOr<MoveTenantToClusterReply> moveTenantToClusterReply =
+		    wait(src->getTenantBalancer()->moveTenantToCluster.tryGetReply(srcRequest));
 
 		// state DatabaseBackupAgent backupAgent(src);
 		// wait(backupAgent.submitBackup(
