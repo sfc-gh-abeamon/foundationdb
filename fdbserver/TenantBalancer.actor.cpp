@@ -57,9 +57,9 @@ struct TenantBalancer {
 	DatabaseBackupAgent agent;
 };
 
+// src
 ACTOR Future<Void> moveTenantToCluster(TenantBalancer* self, MoveTenantToClusterRequest req) {
 	wait(delay(0)); // TODO: this is temporary; to be removed when we add code
-
 	try {
 		MoveTenantToClusterReply reply;
 		req.reply.send(reply);
@@ -70,9 +70,12 @@ ACTOR Future<Void> moveTenantToCluster(TenantBalancer* self, MoveTenantToCluster
 	return Void();
 }
 
+// dest
 ACTOR Future<Void> receiveTenantFromCluster(TenantBalancer* self, ReceiveTenantFromClusterRequest req) {
-	wait(delay(0)); // TODO: this is temporary; to be removed when we add code
-
+	wait(delay(0)); // TODO: this is temporary; to be removed when we add code	
+	// TODO
+	// 1.lock the destination before we start the movement
+	// 2.Prefix is empty.
 	try {
 		ReceiveTenantFromClusterReply reply;
 		req.reply.send(reply);
@@ -139,6 +142,20 @@ ACTOR Future<Void> cleanupMovementSource(TenantBalancer* self, CleanupMovementSo
 	wait(delay(0)); // TODO: this is temporary; to be removed when we add code
 
 	try {
+		CleanupMovementSourceRequest::CleanupType cleanupType = req.cleanupType;
+		state std::string tenantName = req.tenantName;
+		DeleteData deleteData = cleanupType!= CleanupMovementSourceRequest::CleanupType::UNLOCK?DeleteData{true}:DeleteData{false};
+		if(tenantName.empty()){
+			//clean up orphan backup
+			wait(cleanupBackup(self->db, deleteData));
+		}
+		else{
+			//clear specific tenant
+			wait(self->agent.clearPrefix(self->db, Key(tenantName)));
+		}
+		if(cleanupType != CleanupMovementSourceRequest::CleanupType::ERASE){
+			wait(self->agent.unlockBackup(self->db,Key(tenantName)));
+		}
 		CleanupMovementSourceReply reply;
 		req.reply.send(reply);
 	} catch (Error& e) {

@@ -22,6 +22,7 @@
 #include "fdbclient/JsonBuilder.h"
 #include "flow/Arena.h"
 #include "flow/Error.h"
+#include "flow/ITrace.h"
 #include "flow/Trace.h"
 #define BOOST_DATE_TIME_NO_LIB
 #include <boost/interprocess/managed_shared_memory.hpp>
@@ -2163,35 +2164,46 @@ ACTOR Future<Void> runAgent(Database db) {
 
 ACTOR Future<Void> submitDBMove(Database src,
                                 Database dest,
-                                Standalone<VectorRef<KeyRangeRef>> backupRanges,
-                                std::string tagName,
-                                Key addPrefix,
-                                Key removePrefix) {
+                                Key destPrefix,
+                                Key srcPrefix) {
+	std::string dBMoveTagName = "DBMoveTagName";								
 	try {
-		state ReceiveTenantFromClusterRequest destRequest(removePrefix, addPrefix);
+		//TODO: nest them in a transaction
+		state ReceiveTenantFromClusterRequest destRequest(srcPrefix, destPrefix);
 		state ErrorOr<ReceiveTenantFromClusterReply> receiveTenantFromClusterReply =
 		    wait(dest->getTenantBalancer()->receiveTenantFromCluster.tryGetReply(destRequest));
-		
-		state MoveTenantToClusterRequest srcRequest(removePrefix, addPrefix);
+
+		state MoveTenantToClusterRequest srcRequest(srcPrefix, destPrefix);
 		state ErrorOr<MoveTenantToClusterReply> moveTenantToClusterReply =
 		    wait(src->getTenantBalancer()->moveTenantToCluster.tryGetReply(srcRequest));
 
-		// state DatabaseBackupAgent backupAgent(src);
-		// wait(backupAgent.submitBackup(
-		//     dest, KeyRef(tagName), backupRanges, StopWhenDone::False, addPrefix, removePrefix, LockDB::False));
+		// TODO remove later
+		state DatabaseBackupAgent backupAgent(src);
+		
+		Standalone<VectorRef<KeyRangeRef>> backupRanges;
+		KeyRef beginKey = srcPrefix, endKey = strinc(StringRef(srcPrefix.toString()));
+		backupRanges.add({beginKey,endKey});
+		wait(backupAgent.submitBackup(
+		    dest, KeyRef(dBMoveTagName), backupRanges, StopWhenDone::False, destPrefix, srcPrefix, LockDB::False));
 
-		// // Check if a backup agent is running
-		// bool agentRunning = wait(backupAgent.checkActive(dest));
+		// Check if a backup agent is running
+		bool agentRunning = wait(backupAgent.checkActive(dest));
 
-		// if (!agentRunning) {
-		// 	printf("The data movement on tag `%s' was successfully submitted but no DR agents are responding.\n",
-		// 	       printable(StringRef(tagName)).c_str());
+		if (!agentRunning) {
+			printf("The data movement on tag `%s' was successfully submitted but no DR agents are responding.\n",
+			       printable(StringRef(dBMoveTagName)).c_str());
 
-		// 	// Throw an error that will not display any additional information
-		// 	throw actor_cancelled();
-		// }
-		// printf("The data movement on tag `%s' was successfully submitted.\n", printable(StringRef(tagName)).c_str());
+			// Throw an error that will not display any additional information
+			throw actor_cancelled();
+		}
+		printf("The data movement on tag `%s' was successfully submitted.\n", dBMoveTagName.c_str());
 	} catch (Error& e) {
+		// TODO design error report here
+		// The destination prefix is not empty
+		// The clusters are not version compatible
+		// Any failure starting DR
+		// Maybe - timeout
+
 		if (e.code() == error_code_actor_cancelled)
 			throw;
 		switch (e.code()) {
@@ -2201,7 +2213,7 @@ ACTOR Future<Void> submitDBMove(Database src,
 		case error_code_backup_duplicate:
 			fprintf(stderr,
 			        "ERROR: A data movement is already running on tag `%s'\n",
-			        printable(StringRef(tagName)).c_str());
+			        dBMoveTagName.c_str());
 			break;
 		default:
 			fprintf(stderr, "ERROR: %s\n", e.what());
@@ -2222,7 +2234,6 @@ ACTOR Future<Void> statusDBMove(Database src,
                                 KeyRef srcPrefix,
                                 bool json = false) {
 	try {
-		// TODO do we need to specify dest, prefixes, isJson, etc...?
 		GetActiveMovementsRequest getActiveMovementsRequest;
 		state ErrorOr<GetActiveMovementsReply> getActiveMovementsReply =
 		    wait(src->getTenantBalancer()->getActiveMovements.tryGetReply(getActiveMovementsRequest));
@@ -2257,13 +2268,13 @@ ACTOR Future<Void> finishDBMove(Database src,
                                 std::string tagName,
                                 ForceAction forceAction) {
 	try {
-		FinishSourceMovementRequest finishSourceMovementRequest(srcPrefix.toString());
-		state ErrorOr<FinishSourceMovementReply> finishSourceMovementReply =
-		    wait(src->getTenantBalancer()->finishSourceMovement.tryGetReply(finishSourceMovementRequest));
+		// state FinishSourceMovementRequest finishSourceMovementRequest(src,dest,srcPrefix.toString(),destPrefix.toString(),backupRanges.contents(),tagName,forceAction);
+		// state ErrorOr<FinishSourceMovementReply> finishSourceMovementReply =
+		//     wait(src->getTenantBalancer()->finishSourceMovement.tryGetReply(finishSourceMovementRequest));
 
-		Version version = finishSourceMovementReply.get().version;
-		FinishDestinationMovementRequest finishDestinationMovementRequest(destPrefix.toString(), version);
-		wait(dest->getTenantBalancer()->finishDestinationMovement.tryGetReply(finishDestinationMovementRequest));
+		// state Version version = finishSourceMovementReply.get().version;
+		// state FinishDestinationMovementRequest finishDestinationMovementRequest(destPrefix.toString(), version);
+		// wait(dest->getTenantBalancer()->finishDestinationMovement.tryGetReply(finishDestinationMovementRequest));
 
 		// state DatabaseBackupAgent backupAgent(src);
 		// // Backup everything, if no ranges were specified
@@ -2331,7 +2342,10 @@ ACTOR Future<Void> abortDBMove(Database src,
 
 ACTOR Future<Void> cleanupDBMove(Database db, DeleteData deleteData) {
 	try {
-		wait(cleanupBackup(db, deleteData));
+		state CleanupMovementSourceRequest cleanupMovementSourceRequest;
+		wait(db->getTenantBalancer()->cleanupMovementSource.tryGetReply(cleanupMovementSourceRequest));
+		
+		// wait(cleanupBackup(db, deleteData));
 	} catch (Error& e) {
 		if (e.code() == error_code_actor_cancelled)
 			throw;
@@ -2345,8 +2359,11 @@ ACTOR Future<Void> cleanupDBMove(Database db, DeleteData deleteData) {
 // TODO change error code for all the operations about dbmove
 ACTOR Future<Void> clearSrcDBMove(Database src, KeyRef srcPrefix) {
 	try {
-		state DatabaseBackupAgent backupAgent(src);
-		wait(backupAgent.clearPrefix(src, srcPrefix));
+		state CleanupMovementSourceRequest cleanupMovementSourceRequest(srcPrefix.toString(),CleanupMovementSourceRequest::CleanupType::ERASE_AND_UNLOCK);
+		wait(src->getTenantBalancer()->cleanupMovementSource.tryGetReply(cleanupMovementSourceRequest));
+
+		// state DatabaseBackupAgent backupAgent(src);
+		// wait(backupAgent.clearPrefix(src, srcPrefix));
 	} catch (Error& e) {
 		if (e.code() == error_code_actor_cancelled)
 			throw;
@@ -4858,7 +4875,7 @@ int main(int argc, char* argv[]) {
 				if (!initCluster() || !initSourceCluster(true)) {
 					return FDB_EXIT_ERROR;
 				}
-				f = stopAfter(submitDBMove(sourceDb, db, backupKeys, tagName, Key(addPrefix), Key(removePrefix)));
+				f = stopAfter(submitDBMove(sourceDb, db, Key(addPrefix), Key(removePrefix)));
 				break;
 			case DBMoveType::STATUS:
 				if (!initCluster() || !initSourceCluster(true)) {
