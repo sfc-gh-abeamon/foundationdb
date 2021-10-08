@@ -185,10 +185,8 @@ struct TenantMovementInfo {
 	// movement status
 
 	// TODO: how to track destClusterFile?
-	std::string srcClusterFile;
-	std::string destClusterFile;
-	std::string uid;
-	std::string TenandMovementStatus;
+	std::string destConnectionString;
+	std::string TenantMovementStatus;
 	std::string seconds_behind;
 
 	template <class Ar>

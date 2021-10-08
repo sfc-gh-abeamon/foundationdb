@@ -230,9 +230,8 @@ ACTOR Future<std::vector<TenantMovementInfo>> fetchDBMove(Database db, bool isSr
 	state std::vector<TenantMovementInfo> recorder;
 	try {
 		// TODO distinguish dr and data movement
-		// get running data movement
-		// TODO make sure is this the right way to get status json?
 		// TODO switch to another cheaper way
+		// get running data movement
 		state StatusObject statusObjCluster = wait(StatusClient::statusFetcher(db));
 		StatusObjectReader reader(statusObjCluster);
 		std::string context = isSrc ? "dr_backup" : "dr_backup_dest";
@@ -244,16 +243,14 @@ ACTOR Future<std::vector<TenantMovementInfo>> fetchDBMove(Database db, bool isSr
 				bool running = false;
 				tag.tryGet("running_backup", running);
 				if (running) {
-					std::string backup_state, seconds_behind, uid;
+					std::string backup_state, seconds_behind;
 					tag.tryGet("backup_state", backup_state);
 					tag.tryGet("seconds_behind", seconds_behind);
-					tag.tryGet("mutation_stream_id", uid);
 					TenantMovementInfo tenantMovementInfo;
 					tenantMovementInfo.movementLocation =
 					    isSrc ? TenantMovementInfo::Location::SOURCE : TenantMovementInfo::Location::DEST;
-					tenantMovementInfo.TenandMovementStatus = backup_state;
+					tenantMovementInfo.TenantMovementStatus = backup_state;
 					tenantMovementInfo.seconds_behind = seconds_behind;
-					tenantMovementInfo.uid = uid;
 					recorder.push_back(tenantMovementInfo);
 				}
 			}

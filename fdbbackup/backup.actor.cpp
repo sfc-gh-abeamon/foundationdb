@@ -2198,7 +2198,7 @@ ACTOR Future<Void> submitDBMove(Database src, Database dest, Key destPrefix, Key
 	return Void();
 }
 
-ACTOR Future<Void> statusDBMove(Database src, Database dest, KeyRef destPrefix, KeyRef srcPrefix, bool json = false) {
+ACTOR Future<Void> statusDBMove(Database src, Database dest, KeyRef srcPrefix, bool json = false) {
 	try {
 		// Send GetActiveMovementsRequest to source cluster
 		GetActiveMovementsRequest getActiveMovementsRequest;
@@ -2207,35 +2207,18 @@ ACTOR Future<Void> statusDBMove(Database src, Database dest, KeyRef destPrefix, 
 
 		// Filter for desired movement
 		std::vector<TenantMovementInfo> activeMovements = getActiveMovementsReply.get().activeMovements;
-		const TenantMovementInfo* targetInfoPtr = nullptr;
+		bool findMovement = false;
 		for (const auto& movement : activeMovements) {
-			if (movement.destPrefix == destPrefix && movement.sourcePrefix == srcPrefix &&
-			    movement.destClusterFile == dest->getConnectionRecord()->getConnectionString().toString()) {
-				targetInfoPtr = &movement;
+			if (movement.destConnectionString == dest->getConnectionRecord()->getConnectionString().toString()) {
+				findMovement = true;
+				std::string statusText = movement.toString(json);
+				printf("%s\n", statusText.c_str());
 				break;
 			}
 		}
-		if (targetInfoPtr == nullptr) {
-			// Movement record not found
-			// TODO throw specific error
-			throw;
+		if (!findMovement) {
+			throw movement_no_such_status();
 		}
-
-		// Generate status output
-		std::string statusText = targetInfoPtr->toString(json);
-		printf("%s\n", statusText.c_str());
-
-		// state DatabaseBackupAgent backupAgent(src);
-		// state DatabaseBackupStatus backUpStatus = wait(backupAgent.getStatusData(dest, errorLimit,
-		// StringRef(tagName)));
-
-		// backUpStatus.srcClusterFile = src->getConnectionFile()->getFilename();
-		// backUpStatus.destClusterFile = dest->getConnectionFile()->getFilename();
-		// backUpStatus.srcPrefix = srcPrefix.size() ? srcPrefix : KeyRef("`not specified`");
-		// backUpStatus.destPrefix = destPrefix.size() ? destPrefix : KeyRef("`not specified`");
-
-		// std::string statusText = json ? backUpStatus.toJson() : backUpStatus.toString();
-		// printf("%s\n", statusText.c_str());
 	} catch (Error& e) {
 		if (e.code() == error_code_actor_cancelled)
 			throw;
@@ -2397,8 +2380,7 @@ ACTOR Future<Void> listDBMove(Database src, Database dest) {
 		    wait(src->getTenantBalancer().get().getActiveMovements.tryGetReply(srcActiveMovementsRequest));
 
 		for (const auto& movement : srcActiveMovementsReply.get().activeMovements) {
-			if (movement.movementLocation == TenantMovementInfo::Location::SOURCE &&
-			    movement.destClusterFile == dest->getConnectionRecord()->getConnectionString().toString()) {
+			if (movement.destConnectionString == dest->getConnectionRecord()->getConnectionString().toString()) {
 				printf(movement.toString(false).c_str());
 			}
 		}
@@ -4838,7 +4820,7 @@ int main(int argc, char* argv[]) {
 				if (!initCluster() || !initSourceCluster(true)) {
 					return FDB_EXIT_ERROR;
 				}
-				f = stopAfter(statusDBMove(sourceDb, db, KeyRef(addPrefix), KeyRef(removePrefix), jsonOutput));
+				f = stopAfter(statusDBMove(sourceDb, db, KeyRef(removePrefix), jsonOutput));
 				break;
 			case DBMoveType::FINISH:
 				if (!initCluster() || !initSourceCluster(true)) {
