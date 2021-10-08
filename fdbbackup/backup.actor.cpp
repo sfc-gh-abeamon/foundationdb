@@ -38,6 +38,7 @@
 #include "fdbclient/BackupAgent.actor.h"
 #include "fdbclient/Status.h"
 #include "fdbclient/BackupContainer.h"
+#include "fdbclient/ClusterConnectionFile.h"
 #include "fdbclient/KeyBackedTypes.h"
 #include "fdbclient/IKnobCollection.h"
 #include "fdbclient/RunTransaction.actor.h"
@@ -2215,6 +2216,7 @@ ACTOR Future<Void> submitDBMove(Database src, Database dest, Key destPrefix, Key
 
 ACTOR Future<Void> statusDBMove(Database src, Database dest, KeyRef destPrefix, KeyRef srcPrefix, bool json = false) {
 	try {
+<<<<<<< HEAD
 		// Send GetActiveMovementsRequest to source cluster
 		GetActiveMovementsRequest getActiveMovementsRequest;
 		state ErrorOr<GetActiveMovementsReply> getActiveMovementsReply =
@@ -2235,6 +2237,15 @@ ACTOR Future<Void> statusDBMove(Database src, Database dest, KeyRef destPrefix, 
 			// TODO throw specific error
 			throw;
 		}
+=======
+		state DatabaseBackupAgent backupAgent(src);
+		state DatabaseBackupStatus backUpStatus = wait(backupAgent.getStatusData(dest, errorLimit, StringRef(tagName)));
+
+		backUpStatus.srcClusterFile = src->getConnectionRecord()->getLocation().toString();
+		backUpStatus.destClusterFile = dest->getConnectionRecord()->getLocation().toString();
+		backUpStatus.srcPrefix = srcPrefix.size() ? srcPrefix : KeyRef("`not specified`");
+		backUpStatus.destPrefix = destPrefix.size() ? destPrefix : KeyRef("`not specified`");
+>>>>>>> e19acd5fe (Abstract cluster file to be able to use other storage media besides a file.)
 
 		// Generate status output
 		std::string statusText = targetInfoPtr->toString(json);
@@ -2386,9 +2397,15 @@ ACTOR Future<Void> listDBMove(Database db, bool isSrc) {
 		printf("%s %s %s\n",
 		       "List running data movement",
 		       (isSrc ? "from" : "to"),
+<<<<<<< HEAD
 		       db->getConnectionFile()->getFilename().c_str());
 		for (const auto& movement : targetMovements) {
 			printf(movement.toString(false).c_str());
+=======
+		       db->getConnectionRecord()->getLocation().toString().c_str());
+		for (const auto& entry : recorder) {
+			printf("tag: %s  uid: %s\n", entry.first.c_str(), entry.second.c_str());
+>>>>>>> e19acd5fe (Abstract cluster file to be able to use other storage media besides a file.)
 		}
 	} catch (Error& e) {
 		if (e.code() == error_code_actor_cancelled)
@@ -2404,6 +2421,7 @@ ACTOR Future<Void> listDBMove(Database src, Database dest) {
 	try {
 		printf("%s from %s to %s\n",
 		       "List running data movement",
+<<<<<<< HEAD
 		       src->getConnectionFile()->getFilename().c_str(),
 		       dest->getConnectionFile()->getFilename().c_str());
 		// Send GetActiveMovementsRequest to clusters
@@ -2415,6 +2433,19 @@ ACTOR Future<Void> listDBMove(Database src, Database dest) {
 			if (movement.movementLocation == TenantMovementInfo::Location::SOURCE &&
 			    movement.destClusterFile == dest->getConnectionFile()->getFilename()) {
 				printf(movement.toString(false).c_str());
+=======
+		       src->getConnectionRecord()->getLocation().toString().c_str(),
+		       dest->getConnectionRecord()->getLocation().toString().c_str());
+		state std::unordered_map<std::string, std::string> srcRecorder = wait(fetchDBMove(src, true));
+		state std::unordered_map<std::string, std::string> destRecorder = wait(fetchDBMove(dest, false));
+		std::unordered_set<std::string> visited;
+		for (const auto& [_, uid] : srcRecorder) {
+			visited.insert(uid);
+		}
+		for (const auto& entry : destRecorder) {
+			if (visited.count(entry.second)) {
+				printf("tag: %s  uid: %s\n", entry.first.c_str(), entry.second.c_str());
+>>>>>>> e19acd5fe (Abstract cluster file to be able to use other storage media besides a file.)
 			}
 		}
 	} catch (Error& e) {
