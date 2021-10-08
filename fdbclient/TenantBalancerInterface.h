@@ -119,12 +119,13 @@ struct MoveTenantToClusterRequest {
 	KeyRef destPrefix;
 
 	// TODO: dest cluster info
+	std::string destConnectionString;
 
 	ReplyPromise<MoveTenantToClusterReply> reply;
 
 	MoveTenantToClusterRequest() {}
-	MoveTenantToClusterRequest(KeyRef sourcePrefix, KeyRef destPrefix)
-	  : sourcePrefix(arena, sourcePrefix), destPrefix(arena, destPrefix) {}
+	MoveTenantToClusterRequest(KeyRef sourcePrefix, KeyRef destPrefix, std::string destConnectionString)
+	  : sourcePrefix(arena, sourcePrefix), destPrefix(arena, destPrefix),destConnectionString(destConnectionString) {}
 
 	template <class Ar>
 	void serialize(Ar& ar) {

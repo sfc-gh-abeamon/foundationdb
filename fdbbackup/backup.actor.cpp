@@ -2169,10 +2169,13 @@ ACTOR Future<Void> submitDBMove(Database src, Database dest, Key destPrefix, Key
 		state ErrorOr<ReceiveTenantFromClusterReply> receiveTenantFromClusterReply =
 		    wait(dest->getTenantBalancer().get().receiveTenantFromCluster.tryGetReply(destRequest));
 
-		state MoveTenantToClusterRequest srcRequest(srcPrefix, destPrefix);
+		state MoveTenantToClusterRequest srcRequest(
+		    srcPrefix, destPrefix, dest->getConnectionRecord()->getConnectionString().toString());
 		state ErrorOr<MoveTenantToClusterReply> moveTenantToClusterReply =
 		    wait(src->getTenantBalancer().get().moveTenantToCluster.tryGetReply(srcRequest));
-
+		if (moveTenantToClusterReply.isError()) {
+			throw moveTenantToClusterReply.getError();
+		}
 		printf("The data movement was successfully submitted.\n");
 	} catch (Error& e) {
 		if (e.code() == error_code_actor_cancelled)

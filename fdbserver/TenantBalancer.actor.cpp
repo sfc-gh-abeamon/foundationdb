@@ -37,11 +37,12 @@ public:
 	                     std::string databaseName,
 	                     Database destinationDb)
 	  : sourcePrefix(sourcePrefix), destinationPrefix(destinationPrefix), databaseName(databaseName),
-	    destinationDb(destinationDb) {}
+	    destinationDb(destinationDb), tagName(databaseName) {}
 
 	Standalone<StringRef> getSourcePrefix() const { return sourcePrefix; }
 	Standalone<StringRef> getDestinationPrefix() const { return destinationPrefix; }
 	Database getDestinationDatabase() const { return destinationDb; }
+	std::string getTagName() const { return tagName; }
 
 private:
 	Standalone<StringRef> sourcePrefix;
@@ -50,6 +51,7 @@ private:
 	std::string databaseName;
 	// TODO: leave this open, or open it at request time?
 	Database destinationDb;
+	std::string tagName;
 };
 
 class DestinationMovementRecord {
@@ -159,26 +161,33 @@ private:
 ACTOR Future<Void> moveTenantToCluster(TenantBalancer* self, MoveTenantToClusterRequest req) {
 	wait(delay(0)); // TODO: this is temporary; to be removed when we add code
 	try {
-		//1.Extract necessary data from metadata
-		//2.Use DR to do datamovement
+		// 1.Extract necessary data from metadata
+		self->addExternalDatabase(req.destConnectionString, req.destConnectionString);
+		state Database destDatabase = self->getExternalDatabase(req.destConnectionString).get();
+		state SourceMovementRecord sourceMovementRecord(
+		    req.sourcePrefix, req.destPrefix, req.destConnectionString, destDatabase);
+		Standalone<VectorRef<KeyRangeRef>> backupRanges;
+		backupRanges.add(prefixRange(req.sourcePrefix));
 
-		// state DatabaseBackupAgent backupAgent(src);
+		// 2.Use DR to do datamovement
+		wait(self->agent.submitBackup(self->getExternalDatabase(req.destConnectionString).get(),
+		                              KeyRef(sourceMovementRecord.getTagName()),
+		                              backupRanges,
+		                              StopWhenDone::False,
+		                              req.destPrefix,
+		                              req.sourcePrefix,
+		                              LockDB::False));
+		// Check if a backup agent is running
+		bool agentRunning = wait(self->agent.checkActive(destDatabase));
+		if (!agentRunning) {
+			printf("The data movement on%s was successfully submitted but no DR agents are responding.\n",
+			       self->db->getConnectionRecord()->getConnectionString().toString().c_str());
+			// Throw an error that will not display any additional information
+			throw actor_cancelled();
+		}
 
-		// Standalone<VectorRef<KeyRangeRef>> backupRanges;
-		// backupRanges.add(singleKeyRange(srcPrefix));
-		// wait(backupAgent.submitBackup(
-		//     dest, KeyRef(dBMoveTagName), backupRanges, StopWhenDone::False, destPrefix, srcPrefix, LockDB::False));
-
-		// // Check if a backup agent is running
-		// bool agentRunning = wait(backupAgent.checkActive(dest));
-
-		// if (!agentRunning) {
-		// 	printf("The data movement on tag `%s' was successfully submitted but no DR agents are responding.\n",
-		// 	       printable(StringRef(dBMoveTagName)).c_str());
-
-		// 	// Throw an error that will not display any additional information
-		// 	throw actor_cancelled();
-		// }
+		// 3.Do record
+		self->saveOutgoingMovement(sourceMovementRecord);
 
 		MoveTenantToClusterReply reply;
 		req.reply.send(reply);
@@ -195,15 +204,18 @@ ACTOR Future<Void> receiveTenantFromCluster(TenantBalancer* self, ReceiveTenantF
 	try {
 		Key targetPrefix = req.destPrefix;
 
-		// 1.TODO lock the destination before we start the movement
+		// 1.Lock the destination before we start the movement
+		// TODO
 
 		// 2.Check if prefix is empty.
-		bool isPrefixEmpty = wait(self->agent.isTenantEmpty(self->db,targetPrefix));
-		if(!isPrefixEmpty){
-			throw;
+		bool isPrefixEmpty = wait(self->agent.isTenantEmpty(self->db, targetPrefix));
+		if (!isPrefixEmpty) {
+			throw movement_dest_prefix_no_empty();
 		}
-		
-		// 3.Record it into metadata
+
+		// 3.Do record
+		DestinationMovementRecord destinationMovementRecord(req.sourcePrefix, req.destPrefix);
+		self->saveIncomingMovement(destinationMovementRecord);
 
 		ReceiveTenantFromClusterReply reply;
 		req.reply.send(reply);
