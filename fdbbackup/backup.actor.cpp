@@ -2163,9 +2163,8 @@ ACTOR Future<Void> runAgent(Database db) {
 }
 
 ACTOR Future<Void> submitDBMove(Database src, Database dest, Key destPrefix, Key srcPrefix) {
-	std::string dBMoveTagName = "DBMoveTagName";
 	try {
-		// TODO: nest them in a transaction
+		// TODO: transaction guarantee
 		state ReceiveTenantFromClusterRequest destRequest(srcPrefix, destPrefix);
 		state ErrorOr<ReceiveTenantFromClusterReply> receiveTenantFromClusterReply =
 		    wait(dest->getTenantBalancer().get().receiveTenantFromCluster.tryGetReply(destRequest));
@@ -2174,25 +2173,7 @@ ACTOR Future<Void> submitDBMove(Database src, Database dest, Key destPrefix, Key
 		state ErrorOr<MoveTenantToClusterReply> moveTenantToClusterReply =
 		    wait(src->getTenantBalancer().get().moveTenantToCluster.tryGetReply(srcRequest));
 
-		// TODO remove later
-		state DatabaseBackupAgent backupAgent(src);
-
-		Standalone<VectorRef<KeyRangeRef>> backupRanges;
-		backupRanges.add(singleKeyRange(srcPrefix));
-		wait(backupAgent.submitBackup(
-		    dest, KeyRef(dBMoveTagName), backupRanges, StopWhenDone::False, destPrefix, srcPrefix, LockDB::False));
-
-		// Check if a backup agent is running
-		bool agentRunning = wait(backupAgent.checkActive(dest));
-
-		if (!agentRunning) {
-			printf("The data movement on tag `%s' was successfully submitted but no DR agents are responding.\n",
-			       printable(StringRef(dBMoveTagName)).c_str());
-
-			// Throw an error that will not display any additional information
-			throw actor_cancelled();
-		}
-		printf("The data movement on tag `%s' was successfully submitted.\n", dBMoveTagName.c_str());
+		printf("The data movement was successfully submitted.\n");
 	} catch (Error& e) {
 		if (e.code() == error_code_actor_cancelled)
 			throw;
@@ -2201,7 +2182,7 @@ ACTOR Future<Void> submitDBMove(Database src, Database dest, Key destPrefix, Key
 			fprintf(stderr, "ERROR: An error was encountered during submission\n");
 			break;
 		case error_code_backup_duplicate:
-			fprintf(stderr, "ERROR: A data movement is already running on tag `%s'\n", dBMoveTagName.c_str());
+			fprintf(stderr, "ERROR: A data movement is already running\n");
 			break;
 		default:
 			fprintf(stderr, "ERROR: %s\n", e.what());
@@ -2216,7 +2197,6 @@ ACTOR Future<Void> submitDBMove(Database src, Database dest, Key destPrefix, Key
 
 ACTOR Future<Void> statusDBMove(Database src, Database dest, KeyRef destPrefix, KeyRef srcPrefix, bool json = false) {
 	try {
-<<<<<<< HEAD
 		// Send GetActiveMovementsRequest to source cluster
 		GetActiveMovementsRequest getActiveMovementsRequest;
 		state ErrorOr<GetActiveMovementsReply> getActiveMovementsReply =
@@ -2227,7 +2207,7 @@ ACTOR Future<Void> statusDBMove(Database src, Database dest, KeyRef destPrefix, 
 		const TenantMovementInfo* targetInfoPtr = nullptr;
 		for (const auto& movement : activeMovements) {
 			if (movement.destPrefix == destPrefix && movement.sourcePrefix == srcPrefix &&
-			    movement.destClusterFile == dest->getConnectionFile()->getFilename()) {
+			    movement.destClusterFile == dest->getConnectionRecord()->getConnectionString().toString()) {
 				targetInfoPtr = &movement;
 				break;
 			}
@@ -2237,15 +2217,6 @@ ACTOR Future<Void> statusDBMove(Database src, Database dest, KeyRef destPrefix, 
 			// TODO throw specific error
 			throw;
 		}
-=======
-		state DatabaseBackupAgent backupAgent(src);
-		state DatabaseBackupStatus backUpStatus = wait(backupAgent.getStatusData(dest, errorLimit, StringRef(tagName)));
-
-		backUpStatus.srcClusterFile = src->getConnectionRecord()->getLocation().toString();
-		backUpStatus.destClusterFile = dest->getConnectionRecord()->getLocation().toString();
-		backUpStatus.srcPrefix = srcPrefix.size() ? srcPrefix : KeyRef("`not specified`");
-		backUpStatus.destPrefix = destPrefix.size() ? destPrefix : KeyRef("`not specified`");
->>>>>>> e19acd5fe (Abstract cluster file to be able to use other storage media besides a file.)
 
 		// Generate status output
 		std::string statusText = targetInfoPtr->toString(json);
@@ -2397,15 +2368,9 @@ ACTOR Future<Void> listDBMove(Database db, bool isSrc) {
 		printf("%s %s %s\n",
 		       "List running data movement",
 		       (isSrc ? "from" : "to"),
-<<<<<<< HEAD
-		       db->getConnectionFile()->getFilename().c_str());
+		       db->getConnectionRecord()->getConnectionString().toString().c_str());
 		for (const auto& movement : targetMovements) {
 			printf(movement.toString(false).c_str());
-=======
-		       db->getConnectionRecord()->getLocation().toString().c_str());
-		for (const auto& entry : recorder) {
-			printf("tag: %s  uid: %s\n", entry.first.c_str(), entry.second.c_str());
->>>>>>> e19acd5fe (Abstract cluster file to be able to use other storage media besides a file.)
 		}
 	} catch (Error& e) {
 		if (e.code() == error_code_actor_cancelled)
@@ -2421,9 +2386,8 @@ ACTOR Future<Void> listDBMove(Database src, Database dest) {
 	try {
 		printf("%s from %s to %s\n",
 		       "List running data movement",
-<<<<<<< HEAD
-		       src->getConnectionFile()->getFilename().c_str(),
-		       dest->getConnectionFile()->getFilename().c_str());
+		       src->getConnectionRecord()->getConnectionString().toString().c_str(),
+		       dest->getConnectionRecord()->getConnectionString().toString().c_str());
 		// Send GetActiveMovementsRequest to clusters
 		GetActiveMovementsRequest srcActiveMovementsRequest;
 		state ErrorOr<GetActiveMovementsReply> srcActiveMovementsReply =
@@ -2431,21 +2395,8 @@ ACTOR Future<Void> listDBMove(Database src, Database dest) {
 
 		for (const auto& movement : srcActiveMovementsReply.get().activeMovements) {
 			if (movement.movementLocation == TenantMovementInfo::Location::SOURCE &&
-			    movement.destClusterFile == dest->getConnectionFile()->getFilename()) {
+			    movement.destClusterFile == dest->getConnectionRecord()->getConnectionString().toString()) {
 				printf(movement.toString(false).c_str());
-=======
-		       src->getConnectionRecord()->getLocation().toString().c_str(),
-		       dest->getConnectionRecord()->getLocation().toString().c_str());
-		state std::unordered_map<std::string, std::string> srcRecorder = wait(fetchDBMove(src, true));
-		state std::unordered_map<std::string, std::string> destRecorder = wait(fetchDBMove(dest, false));
-		std::unordered_set<std::string> visited;
-		for (const auto& [_, uid] : srcRecorder) {
-			visited.insert(uid);
-		}
-		for (const auto& entry : destRecorder) {
-			if (visited.count(entry.second)) {
-				printf("tag: %s  uid: %s\n", entry.first.c_str(), entry.second.c_str());
->>>>>>> e19acd5fe (Abstract cluster file to be able to use other storage media besides a file.)
 			}
 		}
 	} catch (Error& e) {

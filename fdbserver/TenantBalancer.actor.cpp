@@ -19,6 +19,7 @@
  */
 
 #include "fdbclient/BackupAgent.actor.h"
+#include "fdbclient/ClusterConnectionMemoryRecord.h"
 #include "fdbclient/DatabaseContext.h"
 #include "fdbclient/TenantBalancerInterface.h"
 #include "fdbserver/ServerDBInfo.actor.h"
@@ -27,6 +28,43 @@
 #include "fdbclient/StatusClient.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 #include <vector>
+
+class SourceMovementRecord {
+public:
+	SourceMovementRecord() {}
+	SourceMovementRecord(Standalone<StringRef> sourcePrefix,
+	                     Standalone<StringRef> destinationPrefix,
+	                     std::string databaseName,
+	                     Database destinationDb)
+	  : sourcePrefix(sourcePrefix), destinationPrefix(destinationPrefix), databaseName(databaseName),
+	    destinationDb(destinationDb) {}
+
+	Standalone<StringRef> getSourcePrefix() const { return sourcePrefix; }
+	Standalone<StringRef> getDestinationPrefix() const { return destinationPrefix; }
+	Database getDestinationDatabase() const { return destinationDb; }
+
+private:
+	Standalone<StringRef> sourcePrefix;
+	Standalone<StringRef> destinationPrefix;
+
+	std::string databaseName;
+	// TODO: leave this open, or open it at request time?
+	Database destinationDb;
+};
+
+class DestinationMovementRecord {
+public:
+	DestinationMovementRecord() {}
+	DestinationMovementRecord(Standalone<StringRef> sourcePrefix, Standalone<StringRef> destinationPrefix)
+	  : sourcePrefix(sourcePrefix), destinationPrefix(destinationPrefix) {}
+
+	Standalone<StringRef> getSourcePrefix() const { return sourcePrefix; }
+	Standalone<StringRef> getDestinationPrefix() const { return destinationPrefix; }
+
+private:
+	Standalone<StringRef> sourcePrefix;
+	Standalone<StringRef> destinationPrefix;
+};
 
 ACTOR static Future<Void> extractClientInfo(Reference<AsyncVar<ServerDBInfo> const> dbInfo,
                                             Reference<AsyncVar<ClientDBInfo>> info) {
@@ -53,12 +91,95 @@ struct TenantBalancer {
 
 	ActorCollection actors;
 	DatabaseBackupAgent agent;
+
+	SourceMovementRecord getOutgoingMovement(Key prefix) const {
+		auto itr = outgoingMovements.find(prefix);
+		if (itr == outgoingMovements.end()) {
+			throw movement_not_found();
+		}
+
+		return itr->second;
+	}
+
+	DestinationMovementRecord getIncomingMovement(Key prefix) const {
+		auto itr = incomingMovements.find(prefix);
+		if (itr == incomingMovements.end()) {
+			throw movement_not_found();
+		}
+
+		return itr->second;
+	}
+
+	void saveOutgoingMovement(SourceMovementRecord const& record) {
+		outgoingMovements[record.getSourcePrefix()] = record;
+		// TODO: persist in DB
+	}
+
+	void saveIncomingMovement(DestinationMovementRecord const& record) {
+		incomingMovements[record.getDestinationPrefix()] = record;
+		// TODO: persist in DB
+	}
+
+	bool hasSourceMovement(Key prefix) const { return outgoingMovements.count(prefix) > 0; }
+	bool hasDestinationMovement(Key prefix) const { return incomingMovements.count(prefix) > 0; }
+
+	// Returns true if the database is inserted or matches the existing entry
+	bool addExternalDatabase(std::string name, std::string connectionString) {
+		auto itr = externalDatabases.find(name);
+		if (itr != externalDatabases.end()) {
+			return itr->second->getConnectionRecord()->getConnectionString().toString() == connectionString;
+		}
+
+		// TODO: use a key-backed connection file
+		externalDatabases[name] = Database::createDatabase(
+		    makeReference<ClusterConnectionMemoryRecord>(ClusterConnectionString(connectionString)),
+		    Database::API_VERSION_LATEST,
+		    IsInternal::True,
+		    tbi.locality);
+
+		return true;
+	}
+
+	Optional<Database> getExternalDatabase(std::string name) const {
+		auto itr = externalDatabases.find(name);
+		if (itr == externalDatabases.end()) {
+			return Optional<Database>();
+		}
+
+		return itr->second;
+	}
+
+private:
+	std::unordered_map<std::string, Database> externalDatabases;
+	std::map<Key, SourceMovementRecord> outgoingMovements;
+	std::map<Key, DestinationMovementRecord> incomingMovements;
 };
 
 // src
 ACTOR Future<Void> moveTenantToCluster(TenantBalancer* self, MoveTenantToClusterRequest req) {
 	wait(delay(0)); // TODO: this is temporary; to be removed when we add code
 	try {
+		//1.Extract necessary data from metadata
+		//2.Use DR to do datamovement
+
+		// state DatabaseBackupAgent backupAgent(src);
+
+		// Standalone<VectorRef<KeyRangeRef>> backupRanges;
+		// backupRanges.add(singleKeyRange(srcPrefix));
+		// wait(backupAgent.submitBackup(
+		//     dest, KeyRef(dBMoveTagName), backupRanges, StopWhenDone::False, destPrefix, srcPrefix, LockDB::False));
+
+		// // Check if a backup agent is running
+		// bool agentRunning = wait(backupAgent.checkActive(dest));
+
+		// if (!agentRunning) {
+		// 	printf("The data movement on tag `%s' was successfully submitted but no DR agents are responding.\n",
+		// 	       printable(StringRef(dBMoveTagName)).c_str());
+
+		// 	// Throw an error that will not display any additional information
+		// 	throw actor_cancelled();
+		// }
+
 		MoveTenantToClusterReply reply;
 		req.reply.send(reply);
 	} catch (Error& e) {
@@ -71,10 +192,19 @@ ACTOR Future<Void> moveTenantToCluster(TenantBalancer* self, MoveTenantToCluster
 // dest
 ACTOR Future<Void> receiveTenantFromCluster(TenantBalancer* self, ReceiveTenantFromClusterRequest req) {
 	wait(delay(0)); // TODO: this is temporary; to be removed when we add code
-	// TODO
-	// 1.lock the destination before we start the movement
-	// 2.Prefix is empty.
 	try {
+		Key targetPrefix = req.destPrefix;
+
+		// 1.TODO lock the destination before we start the movement
+
+		// 2.Check if prefix is empty.
+		bool isPrefixEmpty = wait(self->agent.isTenantEmpty(self->db,targetPrefix));
+		if(!isPrefixEmpty){
+			throw;
+		}
+		
+		// 3.Record it into metadata
+
 		ReceiveTenantFromClusterReply reply;
 		req.reply.send(reply);
 	} catch (Error& e) {
