@@ -183,9 +183,21 @@ struct TenantMovementInfo {
 	// DR info?
 	// movement status
 
+	// TODO: how to track destClusterFile?
+	std::string srcClusterFile;
+	std::string destClusterFile;
+	std::string uid;
+	std::string TenandMovementStatus;
+	std::string seconds_behind;
+
 	template <class Ar>
 	void serialize(Ar& ar) {
 		serializer(ar, sourcePrefix, destPrefix, movementLocation);
+	}
+
+	std::string toString(bool isJson = false) const {
+		// TODO generate corresponding str
+		return "";
 	}
 };
 

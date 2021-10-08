@@ -23,7 +23,9 @@
 #include "fdbclient/TenantBalancerInterface.h"
 #include "fdbserver/ServerDBInfo.actor.h"
 #include "flow/Trace.h"
+#include "fdbclient/StatusClient.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
+#include <vector>
 
 ACTOR static Future<Void> extractClientInfo(Reference<AsyncVar<ServerDBInfo> const> dbInfo,
                                             Reference<AsyncVar<ClientDBInfo>> info) {
@@ -72,7 +74,7 @@ ACTOR Future<Void> moveTenantToCluster(TenantBalancer* self, MoveTenantToCluster
 
 // dest
 ACTOR Future<Void> receiveTenantFromCluster(TenantBalancer* self, ReceiveTenantFromClusterRequest req) {
-	wait(delay(0)); // TODO: this is temporary; to be removed when we add code	
+	wait(delay(0)); // TODO: this is temporary; to be removed when we add code
 	// TODO
 	// 1.lock the destination before we start the movement
 	// 2.Prefix is empty.
@@ -86,11 +88,59 @@ ACTOR Future<Void> receiveTenantFromCluster(TenantBalancer* self, ReceiveTenantF
 	return Void();
 }
 
+ACTOR Future<std::vector<TenantMovementInfo>> fetchDBMove(Database db, bool isSrc) {
+	state std::vector<TenantMovementInfo> recorder;
+	try {
+		// TODO distinguish dr and data movement
+		// get running data movement
+		// TODO make sure is this the right way to get status json?
+		// TODO switch to another cheaper way
+		state StatusObject statusObjCluster = wait(StatusClient::statusFetcher(db));
+		StatusObjectReader reader(statusObjCluster);
+		std::string context = isSrc ? "dr_backup" : "dr_backup_dest";
+		std::string path = format("layers.%s.tags", context.c_str());
+		StatusObjectReader tags;
+		if (reader.tryGet(path, tags)) {
+			for (auto itr : tags.obj()) {
+				JSONDoc tag(itr.second);
+				bool running = false;
+				tag.tryGet("running_backup", running);
+				if (running) {
+					std::string backup_state, seconds_behind, uid;
+					tag.tryGet("backup_state", backup_state);
+					tag.tryGet("seconds_behind", seconds_behind);
+					tag.tryGet("mutation_stream_id", uid);
+					TenantMovementInfo tenantMovementInfo;
+					tenantMovementInfo.movementLocation =
+					    isSrc ? TenantMovementInfo::Location::SOURCE : TenantMovementInfo::Location::DEST;
+					tenantMovementInfo.TenandMovementStatus = backup_state;
+					tenantMovementInfo.seconds_behind = seconds_behind;
+					tenantMovementInfo.uid = uid;
+					recorder.push_back(tenantMovementInfo);
+				}
+			}
+		}
+	} catch (Error& e) {
+		if (e.code() == error_code_actor_cancelled)
+			throw;
+		fprintf(stderr, "ERROR: %s\n", e.what());
+		throw;
+	}
+
+	return recorder;
+}
+
 ACTOR Future<Void> getActiveMovements(TenantBalancer* self, GetActiveMovementsRequest req) {
 	wait(delay(0)); // TODO: this is temporary; to be removed when we add code
 
 	try {
+		// Get all active movement from status json, and transfer them into TenantMovementInfo in reply
+		// TODO acquire the srcPrefix and destPrefix from somewhere
+		state std::vector<TenantMovementInfo> statusAsSrc = wait(fetchDBMove(self->db, true));
+		state std::vector<TenantMovementInfo> statusAsDest = wait(fetchDBMove(self->db, false));
 		GetActiveMovementsReply reply;
+		reply.activeMovements.insert(reply.activeMovements.end(), statusAsSrc.begin(), statusAsSrc.end());
+		reply.activeMovements.insert(reply.activeMovements.end(), statusAsDest.begin(), statusAsDest.end());
 		req.reply.send(reply);
 	} catch (Error& e) {
 		req.reply.sendError(e);
@@ -142,19 +192,15 @@ ACTOR Future<Void> cleanupMovementSource(TenantBalancer* self, CleanupMovementSo
 	wait(delay(0)); // TODO: this is temporary; to be removed when we add code
 
 	try {
+		// TODO once the range has been unlocked, it will no longer be legal to run cleanup
 		CleanupMovementSourceRequest::CleanupType cleanupType = req.cleanupType;
 		state std::string tenantName = req.tenantName;
-		DeleteData deleteData = cleanupType!= CleanupMovementSourceRequest::CleanupType::UNLOCK?DeleteData{true}:DeleteData{false};
-		if(tenantName.empty()){
-			//clean up orphan backup
-			wait(cleanupBackup(self->db, deleteData));
-		}
-		else{
-			//clear specific tenant
+		if (cleanupType != CleanupMovementSourceRequest::CleanupType::UNLOCK) {
+			// clear specific tenant
 			wait(self->agent.clearPrefix(self->db, Key(tenantName)));
 		}
-		if(cleanupType != CleanupMovementSourceRequest::CleanupType::ERASE){
-			wait(self->agent.unlockBackup(self->db,Key(tenantName)));
+		if (cleanupType != CleanupMovementSourceRequest::CleanupType::ERASE) {
+			wait(self->agent.unlockBackup(self->db, Key(tenantName)));
 		}
 		CleanupMovementSourceReply reply;
 		req.reply.send(reply);
