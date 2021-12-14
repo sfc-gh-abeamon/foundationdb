@@ -23,6 +23,7 @@
 #include "fdbclient/DatabaseContext.h"
 #include "fdbclient/ExternalDatabaseMap.h"
 #include "fdbclient/FDBOptions.g.h"
+#include "fdbclient/ManagementAPI.actor.h"
 #include "fdbclient/TenantBalancerInterface.h"
 #include "fdbserver/Knobs.h"
 #include "fdbserver/ServerDBInfo.actor.h"
@@ -928,29 +929,6 @@ private:
 	MovementRecordMap outgoingMovements;
 	MovementRecordMap incomingMovements;
 };
-
-ACTOR template <class Request>
-Future<REPLY_TYPE(Request)> sendTenantBalancerRequest(Database peerDb,
-                                                      Request request,
-                                                      RequestStream<Request> TenantBalancerInterface::*stream) {
-	state Future<ErrorOr<REPLY_TYPE(Request)>> replyFuture = Never();
-	state Future<Void> initialize = Void();
-
-	loop choose {
-		when(ErrorOr<REPLY_TYPE(Request)> reply = wait(replyFuture)) {
-			if (reply.isError()) {
-				throw reply.getError();
-			}
-			return reply.get();
-		}
-		when(wait(peerDb->onTenantBalancerChanged() || initialize)) {
-			initialize = Never();
-			replyFuture = peerDb->getTenantBalancer().present()
-			                  ? (peerDb->getTenantBalancer().get().*stream).tryGetReply(request)
-			                  : Never();
-		}
-	}
-}
 
 Future<Void> abortPeer(TenantBalancer* self, Reference<const MovementRecord> record) {
 	return success(sendTenantBalancerRequest(

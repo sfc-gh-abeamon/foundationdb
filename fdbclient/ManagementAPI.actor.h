@@ -34,6 +34,7 @@ standard API and some knowledge of the contents of the system key space.
 
 #include <string>
 #include <map>
+#include "fdbclient/DatabaseContext.h"
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbclient/Status.h"
 #include "fdbclient/ReadYourWrites.h"
@@ -748,6 +749,29 @@ Future<ConfigurationResult> changeConfig(Reference<DB> db,
 std::string generateErrorMessage(const CoordinatorsResult& res);
 
 } // namespace ManagementAPI
+
+ACTOR template <class Request>
+Future<REPLY_TYPE(Request)> sendTenantBalancerRequest(Database peerDb,
+                                                      Request request,
+                                                      RequestStream<Request> TenantBalancerInterface::*stream) {
+	state Future<ErrorOr<REPLY_TYPE(Request)>> replyFuture = Never();
+	state Future<Void> initialize = Void();
+
+	loop choose {
+		when(ErrorOr<REPLY_TYPE(Request)> reply = wait(replyFuture)) {
+			if (reply.isError()) {
+				throw reply.getError();
+			}
+			return reply.get();
+		}
+		when(wait(peerDb->onTenantBalancerChanged() || initialize)) {
+			initialize = Never();
+			replyFuture = peerDb->getTenantBalancer().present()
+			                  ? (peerDb->getTenantBalancer().get().*stream).tryGetReply(request)
+			                  : Never();
+		}
+	}
+}
 
 #include "flow/unactorcompiler.h"
 #endif

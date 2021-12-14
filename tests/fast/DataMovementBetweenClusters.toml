@@ -1,0 +1,9 @@
+[configuration]
+extraDB = 2
+
+[[test]]
+testTitle = 'DataMovementBetweenClusters'
+clearAfterTest = false
+
+    [[test.workload]]
+    testName = 'DataMovementBetweenClusters'
