@@ -23,6 +23,7 @@ package com.apple.foundationdb;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.function.Function;
+import com.apple.foundationdb.tuple.Tuple;
 
 /**
  * A mutable, lexicographically ordered mapping from binary keys to binary values.
@@ -48,6 +49,7 @@ public interface Database extends AutoCloseable, TransactionContext {
 	 * been created.
 	 */
 	CompletableFuture<Void> allocateTenant(byte[] tenantName);
+	CompletableFuture<Void> allocateTenant(Tuple tenantName);
 
 	/**
 	 * Deletes a tenant from the cluster.<br>
@@ -60,6 +62,7 @@ public interface Database extends AutoCloseable, TransactionContext {
 	 * been deleted.
 	 */
 	CompletableFuture<Void> deleteTenant(byte[] tenantName);
+	CompletableFuture<Void> deleteTenant(Tuple tenantName);
 
 	/**
 	 * Opens an existing tenant to be used for running transactions.
@@ -70,6 +73,7 @@ public interface Database extends AutoCloseable, TransactionContext {
 	default Tenant openTenant(byte[] tenantName) {
 		return openTenant(tenantName, getExecutor());
 	}
+	Tenant openTenant(Tuple tenantName);
 
 	/**
 	 * Opens an existing tenant to be used for running transactions.
