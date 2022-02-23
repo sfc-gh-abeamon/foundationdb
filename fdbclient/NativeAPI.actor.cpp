@@ -125,10 +125,14 @@ Future<REPLY_TYPE(Request)> loadBalance(
 }
 } // namespace
 
-FDB_BOOLEAN_PARAM(UseTenant);
 FDB_BOOLEAN_PARAM(TransactionRecordLogInfo);
-FDB_BOOLEAN_PARAM(ApplyTenantPrefix);
 FDB_DEFINE_BOOLEAN_PARAM(UseProvisionalProxies);
+
+// Whether or not a request should include the tenant name
+FDB_BOOLEAN_PARAM(UseTenant);
+
+// Whether or not a function should implicitly add the tenant prefix to the request and/or remove it from the result
+FDB_BOOLEAN_PARAM(ApplyTenantPrefix);
 
 NetworkOptions networkOptions;
 TLSConfig tlsConfig(TLSEndpointType::CLIENT);
@@ -735,15 +739,12 @@ Future<Void> attemptGRVFromOldProxies(std::vector<GrvProxyInterface> oldProxies,
 
 ACTOR static Future<Void> monitorClientDBInfoChange(DatabaseContext* cx,
                                                     Reference<AsyncVar<ClientDBInfo> const> clientDBInfo,
-                                                    AsyncTrigger* proxyChangeTrigger,
-                                                    AsyncTrigger* clientLibChangeTrigger) {
+                                                    AsyncTrigger* proxyChangeTrigger) {
 	state std::vector<CommitProxyInterface> curCommitProxies;
 	state std::vector<GrvProxyInterface> curGrvProxies;
 	state ActorCollection actors(false);
-	state uint64_t curClientLibChangeCounter;
 	curCommitProxies = clientDBInfo->get().commitProxies;
 	curGrvProxies = clientDBInfo->get().grvProxies;
-	curClientLibChangeCounter = clientDBInfo->get().clientLibChangeCounter;
 
 	loop {
 		choose {
@@ -765,9 +766,6 @@ ACTOR static Future<Void> monitorClientDBInfoChange(DatabaseContext* cx,
 					curCommitProxies = clientDBInfo->get().commitProxies;
 					curGrvProxies = clientDBInfo->get().grvProxies;
 					proxyChangeTrigger->trigger();
-				}
-				if (curClientLibChangeCounter != clientDBInfo->get().clientLibChangeCounter) {
-					clientLibChangeTrigger->trigger();
 				}
 			}
 			when(wait(actors.getResult())) { UNSTOPPABLE_ASSERT(false); }
@@ -1258,7 +1256,7 @@ DatabaseContext::DatabaseContext(Reference<AsyncVar<Reference<IClusterConnection
 	getValueSubmitted.init(LiteralStringRef("NativeAPI.GetValueSubmitted"));
 	getValueCompleted.init(LiteralStringRef("NativeAPI.GetValueCompleted"));
 
-	clientDBInfoMonitor = monitorClientDBInfoChange(this, clientInfo, &proxiesChangeTrigger, &clientLibChangeTrigger);
+	clientDBInfoMonitor = monitorClientDBInfoChange(this, clientInfo, &proxiesChangeTrigger);
 	tssMismatchHandler = handleTssMismatches(this);
 	clientStatusUpdater.actor = clientStatusUpdateActor(this);
 	cacheListMonitor = monitorCacheList(this);
@@ -1607,10 +1605,6 @@ void DatabaseContext::invalidateCache(const KeyRangeRef& keys) {
 
 Future<Void> DatabaseContext::onProxiesChanged() const {
 	return this->proxiesChangeTrigger.onTrigger();
-}
-
-Future<Void> DatabaseContext::onClientLibStatusChanged() const {
-	return this->clientLibChangeTrigger.onTrigger();
 }
 
 bool DatabaseContext::sampleReadTags() const {
@@ -3195,6 +3189,7 @@ Future<Void> getWatchFuture(Database cx, Reference<WatchParameters> parameters) 
 
 ACTOR Future<Void> watchValueMap(Future<Version> version,
                                  Optional<TenantName> tenant,
+                                 Future<Key> tenantPrefix,
                                  Key key,
                                  Optional<Value> value,
                                  Database cx,
@@ -3204,9 +3199,16 @@ ACTOR Future<Void> watchValueMap(Future<Version> version,
                                  Optional<UID> debugID,
                                  UseProvisionalProxies useProvisionalProxies) {
 	state Version ver = wait(version);
+
+	Key resolvedTenantPrefix = wait(tenantPrefix);
+	if (resolvedTenantPrefix.size()) {
+		key = key.withPrefix(resolvedTenantPrefix);
+	}
+
 	wait(getWatchFuture(
 	    cx,
 	    makeReference<WatchParameters>(tenant, key, value, ver, tags, spanID, taskID, debugID, useProvisionalProxies)));
+
 	return Void();
 }
 
@@ -4323,7 +4325,8 @@ ACTOR Future<Void> getRangeStreamFragment(Reference<TransactionState> trState,
 
 ACTOR Future<Standalone<VectorRef<KeyRef>>> getRangeSplitPoints(Reference<TransactionState> trState,
                                                                 KeyRange keys,
-                                                                int64_t chunkSize);
+                                                                int64_t chunkSize,
+                                                                Optional<Future<Key>> tenantPrefix);
 
 static KeyRange intersect(KeyRangeRef lhs, KeyRangeRef rhs) {
 	return KeyRange(KeyRangeRef(std::max(lhs.begin, rhs.begin), std::min(lhs.end, rhs.end)));
@@ -4348,6 +4351,12 @@ ACTOR Future<Void> getRangeStream(Reference<TransactionState> trState,
 
 	state Version version = wait(fVersion);
 	trState->cx->validateVersion(version);
+
+	Key resolvedTenantPrefix = wait(trState->tenantPrefix);
+	if (resolvedTenantPrefix.size() > 0) {
+		begin = KeySelectorRef(begin.getKey().withPrefix(resolvedTenantPrefix), begin.orEqual, begin.offset);
+		end = KeySelectorRef(end.getKey().withPrefix(resolvedTenantPrefix), end.orEqual, end.offset);
+	}
 
 	Future<Key> fb = resolveKey(trState, begin, version);
 	state Future<Key> fe = resolveKey(trState, end, version);
@@ -4375,8 +4384,8 @@ ACTOR Future<Void> getRangeStream(Reference<TransactionState> trState,
 		state std::pair<KeyRange, Reference<LocationInfo>> ssi =
 		    wait(getKeyLocation(trState, reverse ? e : b, &StorageServerInterface::getKeyValuesStream, reverse));
 		state KeyRange shardIntersection = intersect(ssi.first, KeyRangeRef(b, e));
-		state Standalone<VectorRef<KeyRef>> splitPoints =
-		    wait(getRangeSplitPoints(trState, shardIntersection, CLIENT_KNOBS->RANGESTREAM_FRAGMENT_SIZE));
+		state Standalone<VectorRef<KeyRef>> splitPoints = wait(getRangeSplitPoints(
+		    trState, shardIntersection, CLIENT_KNOBS->RANGESTREAM_FRAGMENT_SIZE, Optional<Future<Key>>()));
 		state std::vector<KeyRange> toSend;
 		// state std::vector<Future<std::list<KeyRangeRef>::iterator>> outstandingRequests;
 
@@ -4466,6 +4475,9 @@ ACTOR Future<Key> getTenantPrefixImpl(Reference<TransactionState> trState, Futur
 	    wait(getValue(trState, trState->tenant.get().withPrefix(tenantMapPrefix), version, UseTenant::False));
 
 	if (!val.present()) {
+		TraceEvent(SevWarn, "ClientTenantNotFound", trState->cx->dbId)
+		    .detail("Tenant", trState->tenant.get())
+		    .backtrace();
 		throw tenant_not_found();
 	}
 
@@ -4474,7 +4486,7 @@ ACTOR Future<Key> getTenantPrefixImpl(Reference<TransactionState> trState, Futur
 
 Future<Key> Transaction::getTenantPrefix() {
 	if (!trState->tenant.present()) {
-		return Key();
+		trState->tenantPrefix = Key();
 	} else if (!trState->tenantPrefix.isValid()) {
 		trState->tenantPrefix = getTenantPrefixImpl(trState, getReadVersion());
 	}
@@ -4600,6 +4612,7 @@ void Watch::setWatch(Future<Void> watchFuture) {
 ACTOR Future<Void> watch(Reference<Watch> watch,
                          Database cx,
                          Optional<TenantName> tenant,
+                         Future<Key> tenantPrefix,
                          TagSet tags,
                          SpanID spanID,
                          TaskPriority taskID,
@@ -4624,6 +4637,7 @@ ACTOR Future<Void> watch(Reference<Watch> watch,
 							cx->clearWatchMetadata();
 							watch->watchFuture = watchValueMap(cx->minAcceptableReadVersion,
 							                                   tenant,
+							                                   tenantPrefix,
 							                                   watch->key,
 							                                   watch->value,
 							                                   cx,
@@ -4663,6 +4677,7 @@ Future<Void> Transaction::watch(Reference<Watch> watch) {
 	return ::watch(watch,
 	               trState->cx,
 	               trState->tenant,
+	               getTenantPrefix(),
 	               trState->options.readTags,
 	               trState->spanID,
 	               trState->taskID,
@@ -5319,6 +5334,7 @@ void Transaction::setupWatches() {
 		for (int i = 0; i < watches.size(); ++i)
 			watches[i]->setWatch(watchValueMap(watchVersion,
 			                                   trState->tenant,
+			                                   getTenantPrefix(),
 			                                   watches[i]->key,
 			                                   watches[i]->value,
 			                                   trState->cx,
@@ -5412,21 +5428,12 @@ ACTOR Future<Optional<ClientTrCommitCostEstimation>> estimateCommitCosts(Referen
 // deserialized as normal), though the implementation of this may not be trivial.
 //
 // We could also try to support a split key on the proxy where the prefix and the rest of the key are not contiguous.
-void applyTenantPrefix(CommitTransactionRequest req, Key tenantPrefix) {
+void applyTenantPrefix(CommitTransactionRequest& req, Key tenantPrefix) {
 	for (auto& m : req.transaction.mutations) {
+		m.param1 = m.param1.withPrefix(tenantPrefix, req.arena);
 		if (m.type == MutationRef::ClearRange) {
-			if (m.param2.startsWith(m.param1)) {
-				m.param2 = m.param2.withPrefix(tenantPrefix, req.arena);
-				m.param1 = m.param2.substr(0, tenantPrefix.size() + m.param1.size());
-			} else {
-				m.param1 = m.param1.withPrefix(tenantPrefix, req.arena);
-				m.param2 = m.param2.withPrefix(tenantPrefix, req.arena);
-			}
-		} else {
-			m.param1 = m.param1.withPrefix(tenantPrefix, req.arena);
-		}
-
-		if (m.type == MutationRef::SetVersionstampedKey) {
+			m.param2 = m.param2.withPrefix(tenantPrefix, req.arena);
+		} else if (m.type == MutationRef::SetVersionstampedKey) {
 			uint8_t* key = mutateString(m.param1);
 			int* offset = reinterpret_cast<int*>(&key[m.param1.size() - 4]);
 			*offset += tenantPrefix.size();
@@ -5434,21 +5441,11 @@ void applyTenantPrefix(CommitTransactionRequest req, Key tenantPrefix) {
 	}
 
 	for (auto& rc : req.transaction.read_conflict_ranges) {
-		if (rc.end.startsWith(rc.begin)) {
-			KeyRef end = rc.end.withPrefix(tenantPrefix, req.arena);
-			rc = KeyRangeRef(end.substr(0, tenantPrefix.size() + rc.begin.size()), end);
-		} else {
-			rc = rc.withPrefix(tenantPrefix, req.arena);
-		}
+		rc = rc.withPrefix(tenantPrefix, req.arena);
 	}
 
 	for (auto& wc : req.transaction.write_conflict_ranges) {
-		if (wc.end.startsWith(wc.begin)) {
-			KeyRef end = wc.end.withPrefix(tenantPrefix, req.arena);
-			wc = KeyRangeRef(end.substr(0, tenantPrefix.size() + wc.begin.size()), end);
-		} else {
-			wc = wc.withPrefix(tenantPrefix, req.arena);
-		}
+		wc = wc.withPrefix(tenantPrefix, req.arena);
 	}
 }
 
@@ -5475,9 +5472,14 @@ ACTOR static Future<Void> tryCommit(Reference<TransactionState> trState,
 			wait(store(req.transaction.read_snapshot, readVersion));
 		}
 
-		Key resolvedTenantPrefix = wait(trState->tenantPrefix);
-		if (!resolvedTenantPrefix.empty()) {
-			applyTenantPrefix(req, resolvedTenantPrefix);
+		try {
+			Key resolvedTenantPrefix = wait(trState->tenantPrefix);
+			if (!resolvedTenantPrefix.empty()) {
+				applyTenantPrefix(req, resolvedTenantPrefix);
+			}
+		} catch (Error& e) {
+			// TODO: use a different error here?
+			throw not_committed();
 		}
 
 		startTime = now();
@@ -6710,8 +6712,19 @@ Future<Standalone<VectorRef<ReadHotRangeWithMetrics>>> DatabaseContext::getReadH
 
 ACTOR Future<Standalone<VectorRef<KeyRef>>> getRangeSplitPoints(Reference<TransactionState> trState,
                                                                 KeyRange keys,
-                                                                int64_t chunkSize) {
+                                                                int64_t chunkSize,
+                                                                Optional<Future<Key>> tenantPrefix) {
 	state Span span("NAPI:GetRangeSplitPoints"_loc, trState->spanID);
+
+	state Key resolvedTenantPrefix;
+	if (tenantPrefix.present()) {
+		Key _resolvedTenantPrefix = wait(trState->tenantPrefix);
+		if (_resolvedTenantPrefix.size() > 0) {
+			resolvedTenantPrefix = _resolvedTenantPrefix;
+			keys = keys.withPrefix(resolvedTenantPrefix);
+		}
+	}
+
 	loop {
 		state std::vector<std::pair<KeyRange, Reference<LocationInfo>>> locations = wait(getKeyRangeLocations(
 		    trState, keys, CLIENT_KNOBS->TOO_MANY, Reverse::False, &StorageServerInterface::getRangeSplitPoints));
@@ -6732,19 +6745,28 @@ ACTOR Future<Standalone<VectorRef<KeyRef>>> getRangeSplitPoints(Reference<Transa
 			wait(waitForAll(fReplies));
 			Standalone<VectorRef<KeyRef>> results;
 
-			results.push_back_deep(results.arena(), keys.begin);
+			results.push_back_deep(results.arena(), keys.begin.removePrefix(resolvedTenantPrefix));
 			for (int i = 0; i < nLocs; i++) {
 				if (i > 0) {
-					results.push_back_deep(results.arena(), locations[i].first.begin); // Need this shard boundary
+					results.push_back_deep(
+					    results.arena(),
+					    locations[i].first.begin.removePrefix(resolvedTenantPrefix)); // Need this shard boundary
 				}
 				if (fReplies[i].get().splitPoints.size() > 0) {
-					results.append(
-					    results.arena(), fReplies[i].get().splitPoints.begin(), fReplies[i].get().splitPoints.size());
+					if (resolvedTenantPrefix.size() == 0) {
+						results.append(results.arena(),
+						               fReplies[i].get().splitPoints.begin(),
+						               fReplies[i].get().splitPoints.size());
+					} else {
+						for (auto sp : fReplies[i].get().splitPoints) {
+							results.push_back(results.arena(), sp.removePrefix(resolvedTenantPrefix));
+						}
+					}
 					results.arena().dependsOn(fReplies[i].get().splitPoints.arena());
 				}
 			}
 			if (results.back() != keys.end) {
-				results.push_back_deep(results.arena(), keys.end);
+				results.push_back_deep(results.arena(), keys.end.removePrefix(resolvedTenantPrefix));
 			}
 
 			return results;
@@ -6760,7 +6782,7 @@ ACTOR Future<Standalone<VectorRef<KeyRef>>> getRangeSplitPoints(Reference<Transa
 }
 
 Future<Standalone<VectorRef<KeyRef>>> Transaction::getRangeSplitPoints(KeyRange const& keys, int64_t chunkSize) {
-	return ::getRangeSplitPoints(trState, keys, chunkSize);
+	return ::getRangeSplitPoints(trState, keys, chunkSize, getTenantPrefix());
 }
 
 #define BG_REQUEST_DEBUG false

@@ -369,6 +369,9 @@ UID decodeTssQuarantineKey(KeyRef const& key) {
 
 const KeyRangeRef tssMismatchKeys(LiteralStringRef("\xff/tssMismatch/"), LiteralStringRef("\xff/tssMismatch0"));
 
+const KeyRangeRef serverMetadataKeys(LiteralStringRef("\xff/serverMetadata/"),
+                                     LiteralStringRef("\xff/serverMetadata0"));
+
 const KeyRangeRef serverTagKeys(LiteralStringRef("\xff/serverTag/"), LiteralStringRef("\xff/serverTag0"));
 
 const KeyRef serverTagPrefix = serverTagKeys.begin;
@@ -633,7 +636,10 @@ const KeyRef configKeysPrefix = configKeys.begin;
 
 const KeyRef perpetualStorageWiggleKey(LiteralStringRef("\xff/conf/perpetual_storage_wiggle"));
 const KeyRef perpetualStorageWiggleLocalityKey(LiteralStringRef("\xff/conf/perpetual_storage_wiggle_locality"));
-const KeyRef wigglingStorageServerKey(LiteralStringRef("\xff/storageWigglePID"));
+const KeyRef perpetualStorageWiggleIDPrefix(
+    LiteralStringRef("\xff/storageWiggleID/")); // withSuffix /primary or /remote
+const KeyRef perpetualStorageWiggleStatsPrefix(
+    LiteralStringRef("\xff/storageWiggleStats/")); // withSuffix /primary or /remote
 
 const KeyRef triggerDDTeamInfoPrintKey(LiteralStringRef("\xff/triggerDDTeamInfoPrint"));
 
@@ -1027,16 +1033,6 @@ std::pair<Key, Version> decodeHealthyZoneValue(ValueRef const& value) {
 	return std::make_pair(zoneId, version);
 }
 
-const KeyRangeRef clientLibMetadataKeys(LiteralStringRef("\xff\x02/clientlib/meta/"),
-                                        LiteralStringRef("\xff\x02/clientlib/meta0"));
-const KeyRef clientLibMetadataPrefix = clientLibMetadataKeys.begin;
-
-const KeyRangeRef clientLibBinaryKeys(LiteralStringRef("\xff\x02/clientlib/bin/"),
-                                      LiteralStringRef("\xff\x02/clientlib/bin0"));
-const KeyRef clientLibBinaryPrefix = clientLibBinaryKeys.begin;
-
-const KeyRef clientLibChangeCounterKey = "\xff\x02/clientlib/changeCounter"_sr;
-
 const KeyRangeRef testOnlyTxnStateStorePrefixRange(LiteralStringRef("\xff/TESTONLYtxnStateStore/"),
                                                    LiteralStringRef("\xff/TESTONLYtxnStateStore0"));
 
@@ -1337,11 +1333,11 @@ TenantMapEntry decodeTenantEntry(ValueRef const& value) {
 	return entry;
 }
 
-const KeyRangeRef tenantMapKeys("\xff\x02/tenantMap/"_sr, "\xff\x02/tenantMap0"_sr);
+const KeyRangeRef tenantMapKeys("\xff/tenantMap/"_sr, "\xff/tenantMap0"_sr);
 const KeyRef tenantMapPrefix = tenantMapKeys.begin;
-const KeyRef tenantMapPrivatePrefix = "\xff\xff\x02/tenantMap/"_sr;
-const KeyRef tenantAllocatorPrefix = "\xff\x02/tenantAllocator/"_sr;
-const KeyRef tenantDataPrefixKey = "\xff\x02/tenantDataPrefix"_sr;
+const KeyRef tenantMapPrivatePrefix = "\xff\xff/tenantMap/"_sr;
+const KeyRef tenantAllocatorPrefix = "\xff/tenantAllocator/"_sr;
+const KeyRef tenantDataPrefixKey = "\xff/tenantDataPrefix"_sr;
 
 // for tests
 void testSSISerdes(StorageServerInterface const& ssi, bool useFB) {
