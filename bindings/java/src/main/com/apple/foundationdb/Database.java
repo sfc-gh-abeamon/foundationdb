@@ -83,6 +83,7 @@ public interface Database extends AutoCloseable, TransactionContext {
 	 * @return a {@link Tenant} that can be used to create transactions that will operate in the tenant's key-space.
 	 */
 	Tenant openTenant(byte[] tenantName, Executor e);
+	Tenant openTenant(Tuple tenantName, Executor e);
 
 	/**
 	 * Opens an existing tenant to be used for running transactions.
@@ -93,6 +94,7 @@ public interface Database extends AutoCloseable, TransactionContext {
 	 * @return a {@link Tenant} that can be used to create transactions that will operate in the tenant's key-space.
 	 */
 	Tenant openTenant(byte[] tenantName, Executor e, EventKeeper eventKeeper);
+	Tenant openTenant(Tuple tenantName, Executor e, EventKeeper eventKeeper);
 
 	/**
 	 * Creates a {@link Transaction} that operates on this {@code Database}. Creating a transaction

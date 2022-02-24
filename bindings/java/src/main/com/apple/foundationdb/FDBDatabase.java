@@ -158,6 +158,11 @@ class FDBDatabase extends NativeObjectWrapper implements Database, OptionConsume
 	}
 
 	@Override
+	public Tenant openTenant(Tuple tenantName, Executor e) {
+		return openTenant(tenantName.pack(), e);
+	}
+
+	@Override
 	public Tenant openTenant(byte[] tenantName, Executor e, EventKeeper eventKeeper) {
 		pointerReadLock.lock();
 		Tenant tenant = null;
@@ -173,6 +178,11 @@ class FDBDatabase extends NativeObjectWrapper implements Database, OptionConsume
 		} finally {
 			pointerReadLock.unlock();
 		}
+	}
+
+	@Override
+	public Tenant openTenant(Tuple tenantName, Executor e, EventKeeper eventKeeper) {
+		return openTenant(tenantName.pack(), e, eventKeeper);
 	}
 
 	@Override
