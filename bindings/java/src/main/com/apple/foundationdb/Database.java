@@ -51,9 +51,10 @@ public interface Database extends AutoCloseable, TransactionContext {
 	CompletableFuture<Void> allocateTenant(byte[] tenantName);
 
 	/**
-	 * Creates a new tenant in the cluster. Convenience method that accepts and packs a Tuple.
+	 * Creates a new tenant in the cluster. This is a convenience method that generates the tenant name by packing a
+	 * {@code Tuple}.
 	 *
-	 * @param tenantName The name of the tenant. Can be any Tuple that does not begin with a 0xFF byte.
+	 * @param tenantName The name of the tenant.
 	 * @return a {@code CompletableFuture} that when set without error will indicate that the tenant has
 	 * been created.
 	 */
@@ -72,10 +73,11 @@ public interface Database extends AutoCloseable, TransactionContext {
 	CompletableFuture<Void> deleteTenant(byte[] tenantName);
 
 	/**
-	 * Deletes a tenant from the cluster. Convenience method that accepts and packs a Tuple.<br>
+	 * Deletes a tenant from the cluster. This is a convenience method that generates the tenant name by packing a
+	 * {@code Tuple}.<br>
 	 * <br>
-	 * <b>Note:</b> A tenant cannot be deleted if it has any data in it. To delete a non-empty tenant, you must
-	 *  first use a clear operation to delete all of its keys.
+	 * <b>Note:</b> A tenant cannot be deleted if it has any data in it. To delete a non-empty
+	 * tenant, you must first use a clear operation to delete all of its keys.
 	 *
 	 * @param tenantName The name of the tenant being deleted, as a Tuple.
 	 * @return a {@code CompletableFuture} that when set without error will indicate that the tenant has
@@ -94,7 +96,8 @@ public interface Database extends AutoCloseable, TransactionContext {
 	}
 
 	/**
-	 * Opens an existing tenant to be used for running transactions. Convenience method that accepts and packs a Tuple.
+	 * Opens an existing tenant to be used for running transactions. This is a convenience method that generates the
+	 * tenant name by packing a {@code Tuple}.
 	 *
 	 * @param tenantName The name of the tenant to open, as a Tuple.
 	 * @return a {@link Tenant} that can be used to create transactions that will operate in the tenant's key-space.
@@ -111,7 +114,8 @@ public interface Database extends AutoCloseable, TransactionContext {
 	Tenant openTenant(byte[] tenantName, Executor e);
 
 	/**
-	 * Opens an existing tenant to be used for running transactions. Convenience method that accepts and packs a Tuple.
+	 * Opens an existing tenant to be used for running transactions. This is a convenience method that generates the
+	 * tenant name by packing a {@code Tuple}.
 	 *
 	 * @param tenantName The name of the tenant to open, as a Tuple.
 	 * @param e the {@link Executor} to use when executing asynchronous callbacks.
@@ -130,7 +134,8 @@ public interface Database extends AutoCloseable, TransactionContext {
 	Tenant openTenant(byte[] tenantName, Executor e, EventKeeper eventKeeper);
 
 	/**
-	 * Opens an existing tenant to be used for running transactions. Convenience method that accepts and packs a Tuple.
+	 * Opens an existing tenant to be used for running transactions. This is a convenience method that generates the
+	 * tenant name by packing a {@code Tuple}.
 	 *
 	 * @param tenantName The name of the tenant to open, as a Tuple.
 	 * @param e the {@link Executor} to use when executing asynchronous callbacks.
