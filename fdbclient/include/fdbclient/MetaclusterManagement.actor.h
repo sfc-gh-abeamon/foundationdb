@@ -35,6 +35,7 @@
 #include "fdbclient/Metacluster.h"
 #include "fdbclient/MultiVersionTransaction.h"
 #include "fdbclient/SystemData.h"
+#include "fdbclient/Tenant.h"
 #include "fdbclient/TenantManagement.actor.h"
 #include "fdbclient/VersionedMap.h"
 #include "flow/flat_buffers.h"
@@ -684,6 +685,115 @@ Future<Void> registerCluster(Reference<DB> db,
 	return Void();
 }
 
+ACTOR template <class Transaction>
+Future<Optional<DataClusterEntry>> restoreClusterTransaction(Transaction tr,
+                                                             ClusterName name,
+                                                             std::string connectionString,
+                                                             DataClusterEntry entry,
+                                                             AddNewTenants addNewTenants,
+                                                             RemoveMissingTenants removeMissingTenants) {
+	// Management Cluster
+	tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+
+	state Future<Void> metaclusterRegistrationCheck =
+	    TenantAPI::checkTenantMode(tr, ClusterType::METACLUSTER_MANAGEMENT);
+	wait(metaclusterRegistrationCheck);
+
+	state Optional<DataClusterEntry> clusterEntry = wait(ManagementClusterMetadata::dataClusters.get(tr, name));
+	if (!clusterEntry.present()) {
+		// end if metacluter does not already know about this data cluster.
+	}
+
+	// get all tenants in the mgmt cluster
+	KeyBackedRangeResult<std::pair<TenantName, TenantMapEntry>> mgmtCluterTenantsFuture =
+	    wait(ManagementClusterMetadata::tenantMetadata.tenantMap.getRange(
+	        tr, ""_sr, "\xff\xff"_sr, CLIENT_KNOBS->MAX_DATA_CLUSTERS * CLIENT_KNOBS->MAX_TENANTS_PER_CLUSTER));
+	std::vector<std::pair<TenantName, TenantMapEntry>> mgmtClusterExistingTenants = mgmtCluterTenantsFuture.results;
+	// convert to map
+	state std::unordered_map<TenantName, TenantMapEntry> mgmtClusterTenantMap;
+	for (auto t : mgmtClusterExistingTenants) {
+		mgmtClusterTenantMap.emplace(t.first, t.second);
+	}
+
+	// get tenants for the specific data cluster in the mgmt cluster
+	state std::pair<Tuple, Tuple> clusterTupleRange =
+	    std::make_pair(Tuple::makeTuple(name), Tuple::makeTuple(keyAfter(name)));
+	state KeyBackedRangeResult<Tuple> tenantEntries = wait(ManagementClusterMetadata::clusterTenantIndex.getRange(
+	    tr, clusterTupleRange.first, clusterTupleRange.second, CLIENT_KNOBS->MAX_TENANTS_PER_CLUSTER));
+	std::vector<Tuple> mgmtTenants = tenantEntries.results;
+	// convert to set
+	std::unordered_set<TenantNameRef> mgmtTenantSet;
+	for (auto t : mgmtTenants) {
+		ASSERT(t.getString(0) == name);
+		mgmtTenantSet.insert(t.getString(1));
+	}
+
+	// get tenants from the restoring data cluster
+	Reference<IDatabase> dataClusterDb = wait(openDatabase(connectionString));
+	state Reference<ITransaction> dataClusterTr = dataClusterDb->createTransaction();
+	state std::vector<std::pair<TenantName, TenantMapEntry>> dataClusterExistingTenants = wait(
+	    TenantAPI::listTenantsTransaction(dataClusterTr, ""_sr, "\xff\xff"_sr, CLIENT_KNOBS->MAX_TENANTS_PER_CLUSTER));
+	// convert to map
+	state std::unordered_map<TenantName, TenantMapEntry> dataClusterTenantMap;
+	for (auto t : dataClusterExistingTenants) {
+		dataClusterTenantMap.emplace(t.first, t.second);
+	}
+
+	std::vector<std::pair<TenantName, TenantMapEntry>> addVector;
+	for (auto t : dataClusterExistingTenants) {
+		// Check to ensure that the tenant is not assigned to another data cluster
+		auto itr = mgmtClusterTenantMap.find(t.first);
+		if ((itr != mgmtClusterTenantMap.end()) && itr->second.assignedCluster.present() &&
+		    itr->second.assignedCluster.get() != name) {
+			// error, fail the restore
+			// set error
+			return Optional<DataClusterEntry>();
+		}
+
+		if (mgmtTenantSet.find(t.first) == mgmtTenantSet.end()) {
+			if (addNewTenants == AddNewTenants::True) {
+				addVector.push_back(t);
+
+				ManagementClusterMetadata::tenantMetadata.tenantMap.set(tr, t.first, t.second);
+
+				// Add the tenant to the cluster -> tenant index
+				state DataClusterMetadata clusterMetadata = wait(getClusterTransaction(tr, name));
+				ManagementClusterMetadata::clusterTenantIndex.insert(tr, Tuple::makeTuple(name, t.first));
+
+				// Add to Group
+				ManagementClusterMetadata::tenantMetadata.tenantGroupTenantIndex.insert(
+				    tr, Tuple::makeTuple(t.second.tenantGroup.get(), t.first));
+			} else {
+				// error
+			}
+		}
+	}
+
+	for (auto t : mgmtTenants) {
+		state TenantNameRef tenantName = t.getString(1);
+		if (dataClusterTenantMap.find(tenantName) == dataClusterTenantMap.end()) {
+			if (removeMissingTenants == RemoveMissingTenants::True) {
+				// removeVector.push_back(tenantName);
+
+				// Erase the tenant from tenantmap
+				ManagementClusterMetadata::tenantMetadata.tenantMap.erase(tr, tenantName);
+
+				// Remove the tenant from the cluster -> tenant index
+				ManagementClusterMetadata::clusterTenantIndex.erase(tr, Tuple::makeTuple(name, tenantName));
+
+				// Remove from tenant group
+				state Optional<TenantMapEntry> tenantEntry = wait(tryGetTenantTransaction(tr, tenantName));
+				state DataClusterMetadata clusterMetadata = wait(getClusterTransaction(tr, name));
+				wait(managementClusterRemoveTenantFromGroup(tr, tenantName, tenantEntry, clusterMetadata));
+			} else {
+				// error
+			}
+		}
+	}
+
+	return Optional<DataClusterEntry>(entry);
+}
+
 ACTOR template <class DB>
 Future<Void> restoreCluster(Reference<DB> db,
                             ClusterName name,
@@ -691,9 +801,65 @@ Future<Void> restoreCluster(Reference<DB> db,
                             DataClusterEntry entry,
                             AddNewTenants addNewTenants,
                             RemoveMissingTenants removeMissingTenants) {
-	// TODO: add implementation
-	wait(delay(0.0));
-	return Void();
+	if (name.startsWith("\xff"_sr)) {
+		throw invalid_cluster_name();
+	}
+
+	state Reference<typename DB::TransactionT> tr = db->createTransaction();
+
+	loop {
+		try {
+			state Optional<DataClusterEntry> newCluster =
+			    wait(restoreClusterTransaction(tr, name, connectionString, entry, addNewTenants, removeMissingTenants));
+
+			wait(buggifiedCommit(tr, BUGGIFY));
+
+			TraceEvent("RestoredDataCluster")
+			    .detail("ClusterName", name)
+			    .detail("ClusterId", newCluster.present() ? newCluster.get().id : UID())
+			    .detail("Version", tr->getCommittedVersion());
+
+			return Void();
+		} catch (Error& e) {
+			wait(safeThreadFutureToFuture(tr->onError(e)));
+		}
+	}
+}
+
+// Returns the cluster metadata for the cluster being deleted, as well as a boolean that will be true if the entry
+// has been removed. If false, then it's the responsibility of the caller to purge the data cluster from the management
+// cluster.
+ACTOR template <class Transaction>
+Future<std::pair<Optional<DataClusterMetadata>, bool>> managementClusterRemove(Transaction tr,
+                                                                               ClusterNameRef name,
+                                                                               bool checkEmpty) {
+	tr->setOption(FDBTransactionOptions::RAW_ACCESS);
+
+	state Optional<DataClusterMetadata> metadata = wait(tryGetClusterTransaction(tr, name));
+	if (!metadata.present()) {
+		return std::make_pair(metadata, true);
+	}
+
+	bool purged = false;
+	if (checkEmpty && metadata.get().entry.allocated.numTenantGroups > 0) {
+		throw cluster_not_empty();
+	} else if (metadata.get().entry.allocated.numTenantGroups == 0) {
+		ManagementClusterMetadata::dataClusters.erase(tr, name);
+		ManagementClusterMetadata::dataClusterConnectionRecords.erase(tr, name);
+		purged = true;
+	} else {
+		// We need to clean up the tenant metadata for this cluster before erasing it. While we are doing that,
+		// lock the entry to prevent other assignments.
+		DataClusterEntry updatedEntry = metadata.get().entry;
+		updatedEntry.locked = true;
+
+		updateClusterMetadata(tr, name, metadata.get(), Optional<ClusterConnectionString>(), updatedEntry);
+	}
+
+	ManagementClusterMetadata::clusterCapacityIndex.erase(
+	    tr, Tuple::makeTuple(metadata.get().entry.allocated.numTenantGroups, name));
+
+	return std::make_pair(metadata, purged);
 }
 
 template <class DB>
