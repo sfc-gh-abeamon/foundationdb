@@ -826,42 +826,6 @@ Future<Void> restoreCluster(Reference<DB> db,
 	}
 }
 
-// Returns the cluster metadata for the cluster being deleted, as well as a boolean that will be true if the entry
-// has been removed. If false, then it's the responsibility of the caller to purge the data cluster from the management
-// cluster.
-ACTOR template <class Transaction>
-Future<std::pair<Optional<DataClusterMetadata>, bool>> managementClusterRemove(Transaction tr,
-                                                                               ClusterNameRef name,
-                                                                               bool checkEmpty) {
-	tr->setOption(FDBTransactionOptions::RAW_ACCESS);
-
-	state Optional<DataClusterMetadata> metadata = wait(tryGetClusterTransaction(tr, name));
-	if (!metadata.present()) {
-		return std::make_pair(metadata, true);
-	}
-
-	bool purged = false;
-	if (checkEmpty && metadata.get().entry.allocated.numTenantGroups > 0) {
-		throw cluster_not_empty();
-	} else if (metadata.get().entry.allocated.numTenantGroups == 0) {
-		ManagementClusterMetadata::dataClusters.erase(tr, name);
-		ManagementClusterMetadata::dataClusterConnectionRecords.erase(tr, name);
-		purged = true;
-	} else {
-		// We need to clean up the tenant metadata for this cluster before erasing it. While we are doing that,
-		// lock the entry to prevent other assignments.
-		DataClusterEntry updatedEntry = metadata.get().entry;
-		updatedEntry.locked = true;
-
-		updateClusterMetadata(tr, name, metadata.get(), Optional<ClusterConnectionString>(), updatedEntry);
-	}
-
-	ManagementClusterMetadata::clusterCapacityIndex.erase(
-	    tr, Tuple::makeTuple(metadata.get().entry.allocated.numTenantGroups, name));
-
-	return std::make_pair(metadata, purged);
-}
-
 template <class DB>
 struct RemoveClusterImpl {
 	MetaclusterOperationContext<DB> ctx;
