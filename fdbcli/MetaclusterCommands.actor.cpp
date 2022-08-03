@@ -23,6 +23,7 @@
 #include "fdbclient/FDBOptions.g.h"
 #include "fdbclient/IClientApi.h"
 #include "fdbclient/Knobs.h"
+#include "fdbclient/Metacluster.h"
 #include "fdbclient/MetaclusterManagement.actor.h"
 #include "fdbclient/Schemas.h"
 
@@ -155,6 +156,17 @@ ACTOR Future<bool> metaclusterRemoveCommand(Reference<IDatabase> db, std::vector
 	wait(MetaclusterAPI::removeCluster(db, clusterName, tokens.size() == 4));
 
 	fmt::print("The cluster `{}' has been removed\n", printable(clusterName).c_str());
+	return true;
+}
+
+// metacluster restore command
+ACTOR Future<bool> metaclusterRestoreCommand(Reference<IDatabase> db, std::vector<StringRef> tokens) {
+	state ClusterNameRef clusterName = tokens[tokens.size() - 1];
+	DataClusterEntry defaultEntry;
+	wait(MetaclusterAPI::restoreCluster(
+	    db, clusterName, "", defaultEntry, AddNewTenants::True, RemoveMissingTenants::True));
+
+	fmt::print("The cluster `{}' has been restored\n", printable(clusterName).c_str());
 	return true;
 }
 
@@ -351,6 +363,8 @@ Future<bool> metaclusterCommand(Reference<IDatabase> db, std::vector<StringRef> 
 		return metaclusterListCommand(db, tokens);
 	} else if (tokencmp(tokens[1], "get")) {
 		return metaclusterGetCommand(db, tokens);
+	} else if (tokencmp(tokens[1], "restore")) {
+		return metaclusterRestoreCommand(db, tokens);
 	} else if (tokencmp(tokens[1], "status")) {
 		return metaclusterStatusCommand(db, tokens);
 	} else {
@@ -364,9 +378,16 @@ void metaclusterGenerator(const char* text,
                           std::vector<std::string>& lc,
                           std::vector<StringRef> const& tokens) {
 	if (tokens.size() == 1) {
-		const char* opts[] = {
-			"create_experimental", "decommission", "register", "remove", "configure", "list", "get", "status", nullptr
-		};
+		const char* opts[] = { "create_experimental",
+			                   "decommission",
+			                   "register",
+			                   "remove",
+			                   "configure",
+			                   "restore",
+			                   "list",
+			                   "get",
+			                   "status",
+			                   nullptr };
 		arrayGenerator(text, line, opts, lc);
 	} else if (tokens.size() > 1 && (tokencmp(tokens[1], "register") || tokencmp(tokens[1], "configure"))) {
 		const char* opts[] = { "max_tenant_groups=", "connection_string=", nullptr };
@@ -380,7 +401,7 @@ void metaclusterGenerator(const char* text,
 
 std::vector<const char*> metaclusterHintGenerator(std::vector<StringRef> const& tokens, bool inArgument) {
 	if (tokens.size() == 1) {
-		return { "<create_experimental|decommission|register|remove|configure|list|get|status>", "[ARGS]" };
+		return { "<create_experimental|decommission|register|remove|configure|restore|list|get|status>", "[ARGS]" };
 	} else if (tokencmp(tokens[1], "create_experimental")) {
 		return { "<NAME>" };
 	} else if (tokencmp(tokens[1], "decommission")) {
@@ -411,6 +432,9 @@ std::vector<const char*> metaclusterHintGenerator(std::vector<StringRef> const& 
 	} else if (tokencmp(tokens[1], "get") && tokens.size() < 4) {
 		static std::vector<const char*> opts = { "<NAME>", "[JSON]" };
 		return std::vector<const char*>(opts.begin() + tokens.size() - 2, opts.end());
+	} else if (tokencmp(tokens[1], "restore") && tokens.size() < 2) {
+		static std::vector<const char*> opts = { "" };
+		return std::vector<const char*>(opts.begin() + tokens.size() - 2, opts.end());
 	} else if (tokencmp(tokens[1], "status") && tokens.size() == 2) {
 		return { "[JSON]" };
 	} else {
@@ -425,6 +449,7 @@ CommandFactory metaclusterRegisterFactory(
                 "`create_experimental' and `decommission' set up or deconfigure a metacluster.\n"
                 "`register' and `remove' add and remove data clusters from the metacluster.\n"
                 "`configure' updates the configuration of a data cluster.\n"
+                "`restore` tries to restore a data cluster.\n"
                 "`list' prints a list of data clusters in the metacluster.\n"
                 "`get' prints the metadata for a particular data cluster.\n"
                 "`status' prints metacluster metadata.\n"),
