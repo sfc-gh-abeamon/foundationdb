@@ -1132,6 +1132,8 @@ Error validateAndProcessTenantAccess(VectorRef<MutationRef> mutations,
 		if (!validAccess) {
 			TraceEvent(SevWarn, "IllegalTenantAccess", pProxyCommitData->dbgid)
 			    .suppressFor(10.0)
+			    .detail("Mutation", mutation)
+			    .detail("TenantId", tenantId)
 			    .detail("Reason", "Raw write to unknown tenant");
 			return illegal_tenant_access();
 		}

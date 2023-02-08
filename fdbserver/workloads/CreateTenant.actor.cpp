@@ -20,6 +20,7 @@
 
 #include <cstdint>
 
+#include "fdbclient/RunRYWTransaction.actor.h"
 #include "fdbclient/Tenant.h"
 #include "fdbclient/TenantManagement.actor.h"
 #include "fdbserver/Knobs.h"
@@ -52,12 +53,16 @@ struct CreateTenantWorkload : TestWorkload {
 
 	ACTOR static Future<Void> _setup(CreateTenantWorkload* self, Database db) {
 		try {
-			TenantMapEntry givenEntry;
+			state TenantMapEntry entry;
 			if (self->tenantGroup.present()) {
-				givenEntry.tenantGroup = self->tenantGroup.get();
+				Optional<TenantGroupEntry> groupEntry =
+				    wait(TenantAPI::createTenantGroup(db.getReference(), self->tenantGroup.get()));
+				ASSERT(groupEntry.present());
+				entry.tenantGroup = groupEntry.get().id;
 			}
-			Optional<TenantMapEntry> entry = wait(TenantAPI::createTenant(db.getReference(), self->tenant, givenEntry));
-			ASSERT(entry.present());
+			Optional<TenantMapEntry> createdEntry =
+			    wait(TenantAPI::createTenant(db.getReference(), self->tenant, entry));
+			ASSERT(createdEntry.present());
 		} catch (Error& e) {
 			TraceEvent(SevError, "TenantCreationFailed").error(e);
 			if (e.code() == error_code_actor_cancelled) {

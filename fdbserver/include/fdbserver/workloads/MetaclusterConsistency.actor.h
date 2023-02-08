@@ -53,12 +53,13 @@ private:
 		KeyBackedRangeResult<Tuple> clusterTenantGroupTuples;
 
 		std::map<int64_t, TenantMapEntry> tenantMap;
-		KeyBackedRangeResult<std::pair<TenantGroupName, TenantGroupEntry>> tenantGroups;
+		std::map<int64_t, TenantGroupEntry> tenantGroupMap;
 
 		std::map<ClusterName, std::set<int64_t>> clusterTenantMap;
-		std::map<ClusterName, std::set<TenantGroupName>> clusterTenantGroupMap;
+		std::map<ClusterName, std::set<int64_t>> clusterTenantGroupMap;
 
 		int64_t tenantCount;
+		int64_t tenantGroupCount;
 		RangeResult systemTenantSubspaceKeys;
 	};
 
@@ -71,6 +72,7 @@ private:
 	ACTOR static Future<Void> loadManagementClusterMetadata(MetaclusterConsistencyCheck* self) {
 		state Reference<typename DB::TransactionT> managementTr = self->managementDb->createTransaction();
 		state KeyBackedRangeResult<std::pair<int64_t, TenantMapEntry>> tenantList;
+		state KeyBackedRangeResult<std::pair<int64_t, TenantGroupEntry>> tenantGroupList;
 
 		loop {
 			try {
@@ -98,10 +100,13 @@ private:
 				     store(self->managementMetadata.tenantCount,
 				           MetaclusterAPI::ManagementClusterMetadata::tenantMetadata().tenantCount.getD(
 				               managementTr, Snapshot::False, 0)) &&
+				     store(self->managementMetadata.tenantGroupCount,
+				           MetaclusterAPI::ManagementClusterMetadata::tenantMetadata().tenantGroupCount.getD(
+				               managementTr, Snapshot::False, 0)) &&
 				     store(tenantList,
 				           MetaclusterAPI::ManagementClusterMetadata::tenantMetadata().tenantMap.getRange(
 				               managementTr, {}, {}, metaclusterMaxTenants)) &&
-				     store(self->managementMetadata.tenantGroups,
+				     store(tenantGroupList,
 				           MetaclusterAPI::ManagementClusterMetadata::tenantMetadata().tenantGroupMap.getRange(
 				               managementTr, {}, {}, metaclusterMaxTenants)) &&
 				     store(self->managementMetadata.systemTenantSubspaceKeys,
@@ -116,6 +121,9 @@ private:
 		self->managementMetadata.tenantMap =
 		    std::map<int64_t, TenantMapEntry>(tenantList.results.begin(), tenantList.results.end());
 
+		self->managementMetadata.tenantGroupMap =
+		    std::map<int64_t, TenantGroupEntry>(tenantGroupList.results.begin(), tenantGroupList.results.end());
+
 		for (auto t : self->managementMetadata.clusterTenantTuples.results) {
 			ASSERT_EQ(t.size(), 3);
 			TenantName tenantName = t.getString(1);
@@ -125,9 +133,11 @@ private:
 		}
 
 		for (auto t : self->managementMetadata.clusterTenantGroupTuples.results) {
-			ASSERT_EQ(t.size(), 2);
+			ASSERT_EQ(t.size(), 3);
 			TenantGroupName tenantGroupName = t.getString(1);
-			self->managementMetadata.clusterTenantGroupMap[t.getString(0)].insert(tenantGroupName);
+			int64_t tenantGroupId = t.getInt(2);
+			ASSERT(tenantGroupName == self->managementMetadata.tenantGroupMap[tenantGroupId].name);
+			self->managementMetadata.clusterTenantGroupMap[t.getString(0)].insert(tenantGroupId);
 		}
 
 		return Void();
@@ -142,19 +152,22 @@ private:
 		           managementMetadata.metaclusterRegistration.get().metaclusterName);
 		ASSERT_LE(managementMetadata.dataClusters.size(), CLIENT_KNOBS->MAX_DATA_CLUSTERS);
 		ASSERT_LE(managementMetadata.tenantCount, metaclusterMaxTenants);
+		ASSERT_LE(managementMetadata.tenantGroupCount, metaclusterMaxTenants);
 		ASSERT(managementMetadata.clusterCapacityTuples.results.size() <= managementMetadata.dataClusters.size() &&
 		       !managementMetadata.clusterCapacityTuples.more);
 		ASSERT(managementMetadata.clusterTenantCounts.results.size() <= managementMetadata.dataClusters.size() &&
 		       !managementMetadata.clusterTenantCounts.more);
 		ASSERT(managementMetadata.clusterTenantTuples.results.size() == managementMetadata.tenantCount &&
 		       !managementMetadata.clusterTenantTuples.more);
-		ASSERT(managementMetadata.clusterTenantGroupTuples.results.size() <= managementMetadata.tenantCount &&
+		fmt::print("ClusterTenantGroupTuples: {}, tenant count: {}, more: {}\n",
+		           managementMetadata.clusterTenantGroupTuples.results.size(),
+		           managementMetadata.tenantCount,
+		           managementMetadata.clusterTenantGroupTuples.more);
+		ASSERT(managementMetadata.clusterTenantGroupTuples.results.size() == managementMetadata.tenantGroupCount &&
 		       !managementMetadata.clusterTenantGroupTuples.more);
 		ASSERT_EQ(managementMetadata.tenantMap.size(), managementMetadata.tenantCount);
-		ASSERT(managementMetadata.tenantGroups.results.size() <= managementMetadata.tenantCount &&
-		       !managementMetadata.tenantGroups.more);
-		ASSERT_EQ(managementMetadata.clusterTenantGroupTuples.results.size(),
-		          managementMetadata.tenantGroups.results.size());
+		ASSERT_LE(managementMetadata.tenantGroupMap.size(), managementMetadata.tenantGroupCount);
+		ASSERT_EQ(managementMetadata.clusterTenantGroupTuples.results.size(), managementMetadata.tenantGroupMap.size());
 
 		// Parse the cluster capacity index. Check that no cluster is represented in the index more than once.
 		std::map<ClusterName, int64_t> clusterAllocatedMap;
@@ -200,7 +213,7 @@ private:
 
 		// Iterate through all tenants and verify related metadata
 		std::map<ClusterName, int> clusterAllocated;
-		std::set<TenantGroupName> processedTenantGroups;
+		std::set<int64_t> processedTenantGroups;
 		for (auto [tenantId, entry] : managementMetadata.tenantMap) {
 			ASSERT(entry.assignedCluster.present());
 
@@ -210,10 +223,6 @@ private:
 			ASSERT(clusterItr->second.count(tenantId));
 
 			if (entry.tenantGroup.present()) {
-				// Count the number of tenant groups allocated in each cluster
-				if (processedTenantGroups.insert(entry.tenantGroup.get()).second) {
-					++clusterAllocated[entry.assignedCluster.get()];
-				}
 				// The tenant group should be stored in the same cluster where it is stored in the cluster tenant
 				// group index
 				auto clusterTenantGroupItr = managementMetadata.clusterTenantGroupMap.find(entry.assignedCluster.get());
@@ -226,19 +235,20 @@ private:
 			}
 		}
 
+		// Each tenant group in the tenant group map should be present in the cluster tenant group map
+		// and have the correct cluster assigned to it.
+		for (auto [id, entry] : managementMetadata.tenantGroupMap) {
+			++clusterAllocated[entry.assignedCluster.get()];
+			ASSERT(entry.assignedCluster.present());
+			auto clusterItr = managementMetadata.clusterTenantGroupMap.find(entry.assignedCluster.get());
+			ASSERT(clusterItr->second.count(id));
+		}
+
 		// The actual allocation for each cluster should match what is stored in the cluster metadata
 		for (auto [name, allocated] : clusterAllocated) {
 			auto itr = managementMetadata.dataClusters.find(name);
 			ASSERT(itr != managementMetadata.dataClusters.end());
 			ASSERT_EQ(allocated, itr->second.entry.allocated.numTenantGroups);
-		}
-
-		// Each tenant group in the tenant group map should be present in the cluster tenant group map
-		// and have the correct cluster assigned to it.
-		for (auto [name, entry] : managementMetadata.tenantGroups.results) {
-			ASSERT(entry.assignedCluster.present());
-			auto clusterItr = managementMetadata.clusterTenantGroupMap.find(entry.assignedCluster.get());
-			ASSERT(clusterItr->second.count(name));
 		}
 
 		// We should not be storing any data in the `\xff` tenant subspace.
@@ -253,7 +263,7 @@ private:
 
 		state Optional<MetaclusterRegistrationEntry> dataClusterRegistration;
 		state KeyBackedRangeResult<std::pair<int64_t, TenantMapEntry>> dataClusterTenantList;
-		state KeyBackedRangeResult<std::pair<TenantGroupName, TenantGroupEntry>> dataClusterTenantGroupList;
+		state KeyBackedRangeResult<std::pair<int64_t, TenantGroupEntry>> dataClusterTenantGroupList;
 
 		state TenantConsistencyCheck<IDatabase> tenantConsistencyCheck(dataDb);
 		wait(tenantConsistencyCheck.run());
@@ -277,8 +287,8 @@ private:
 
 		state std::map<int64_t, TenantMapEntry> dataClusterTenantMap(dataClusterTenantList.results.begin(),
 		                                                             dataClusterTenantList.results.end());
-		state std::map<TenantGroupName, TenantGroupEntry> dataClusterTenantGroupMap(
-		    dataClusterTenantGroupList.results.begin(), dataClusterTenantGroupList.results.end());
+		state std::map<int64_t, TenantGroupEntry> dataClusterTenantGroupMap(dataClusterTenantGroupList.results.begin(),
+		                                                                    dataClusterTenantGroupList.results.end());
 
 		ASSERT(dataClusterRegistration.present());
 		ASSERT_EQ(dataClusterRegistration.get().clusterType, ClusterType::METACLUSTER_DATA);
@@ -288,7 +298,17 @@ private:
 
 		auto& expectedTenants = self->managementMetadata.clusterTenantMap[clusterName];
 
-		std::map<TenantGroupName, int> groupExpectedTenantCounts;
+		for (auto t : expectedTenants) {
+			fmt::print("Expected tenant: {}\n", t);
+		}
+		for (auto t : dataClusterTenantMap) {
+			fmt::print("Data cluster tenant: {} {} {}\n",
+			           t.first,
+			           printable(t.second.tenantName),
+			           t.second.tenantGroup.orDefault(-1));
+		}
+
+		std::map<int64_t, int> groupExpectedTenantCounts;
 		if (!self->allowPartialMetaclusterOperations) {
 			ASSERT_EQ(dataClusterTenantMap.size(), expectedTenants.size());
 		} else {

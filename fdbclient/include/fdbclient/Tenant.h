@@ -79,7 +79,7 @@ struct TenantMapEntry {
 	TenantName tenantName;
 	TenantState tenantState = TenantState::READY;
 	TenantLockState tenantLockState = TenantLockState::UNLOCKED;
-	Optional<TenantGroupName> tenantGroup;
+	Optional<int64_t> tenantGroup;
 	Optional<ClusterName> assignedCluster;
 	int64_t configurationSequenceNum = 0;
 	Optional<TenantName> renameDestination;
@@ -89,7 +89,7 @@ struct TenantMapEntry {
 
 	TenantMapEntry();
 	TenantMapEntry(int64_t id, TenantName tenantName, TenantState tenantState);
-	TenantMapEntry(int64_t id, TenantName tenantName, TenantState tenantState, Optional<TenantGroupName> tenantGroup);
+	TenantMapEntry(int64_t id, TenantName tenantName, TenantState tenantState, Optional<int64_t> tenantGroup);
 
 	void setId(int64_t id);
 	std::string toJson() const;
@@ -126,12 +126,21 @@ struct TenantMapEntry {
 struct TenantGroupEntry {
 	constexpr static FileIdentifier file_identifier = 10764222;
 
+	int64_t id = -1;
+	TenantGroupName name;
 	Optional<ClusterName> assignedCluster;
+	TenantState groupState;
 
 	TenantGroupEntry() = default;
-	TenantGroupEntry(Optional<ClusterName> assignedCluster) : assignedCluster(assignedCluster) {}
+	TenantGroupEntry(int64_t id,
+	                 TenantGroupName name,
+	                 Optional<ClusterName> assignedCluster = Optional<ClusterName>(),
+	                 TenantState groupState = TenantState::READY)
+	  : id(id), name(name), assignedCluster(assignedCluster), groupState(groupState) {}
 
 	json_spirit::mObject toJson() const;
+
+	void configure(Standalone<StringRef> parameter, Optional<Value> value);
 
 	Value encode() { return ObjectWriter::toValue(*this, IncludeVersion()); }
 	static TenantGroupEntry decode(ValueRef const& value) {
@@ -140,7 +149,7 @@ struct TenantGroupEntry {
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, assignedCluster);
+		serializer(ar, assignedCluster, id, name, groupState);
 	}
 };
 
@@ -202,8 +211,10 @@ struct TenantMetadataSpecification {
 	KeyBackedSet<int64_t> tenantTombstones;
 	KeyBackedObjectProperty<TenantTombstoneCleanupData, decltype(IncludeVersion())> tombstoneCleanupData;
 	KeyBackedSet<Tuple> tenantGroupTenantIndex;
-	KeyBackedObjectMap<TenantGroupName, TenantGroupEntry, decltype(IncludeVersion()), NullCodec> tenantGroupMap;
-	KeyBackedMap<TenantGroupName, int64_t> storageQuota;
+	KeyBackedObjectMap<int64_t, TenantGroupEntry, decltype(IncludeVersion()), TenantIdCodec> tenantGroupMap;
+	KeyBackedMap<TenantGroupName, int64_t> tenantGroupNameIndex;
+	KeyBackedBinaryValue<int64_t> tenantGroupCount;
+	KeyBackedMap<int64_t, int64_t> storageQuota;
 	KeyBackedBinaryValue<Versionstamp> lastTenantModification;
 
 	TenantMetadataSpecification(KeyRef prefix)
@@ -213,6 +224,8 @@ struct TenantMetadataSpecification {
 	    tombstoneCleanupData(subspace.withSuffix("tombstoneCleanup"_sr), IncludeVersion()),
 	    tenantGroupTenantIndex(subspace.withSuffix("tenantGroup/tenantIndex/"_sr)),
 	    tenantGroupMap(subspace.withSuffix("tenantGroup/map/"_sr), IncludeVersion()),
+	    tenantGroupNameIndex(subspace.withSuffix("tenantGroup/nameIndex/"_sr)),
+	    tenantGroupCount(subspace.withSuffix("tenantGroup/count"_sr)),
 	    storageQuota(subspace.withSuffix("storageQuota/"_sr)),
 	    lastTenantModification(subspace.withSuffix("lastModification"_sr)) {}
 };
@@ -229,6 +242,8 @@ struct TenantMetadata {
 	static inline auto& tombstoneCleanupData() { return instance().tombstoneCleanupData; }
 	static inline auto& tenantGroupTenantIndex() { return instance().tenantGroupTenantIndex; }
 	static inline auto& tenantGroupMap() { return instance().tenantGroupMap; }
+	static inline auto& tenantGroupNameIndex() { return instance().tenantGroupNameIndex; }
+	static inline auto& tenantGroupCount() { return instance().tenantGroupCount; }
 	static inline auto& storageQuota() { return instance().storageQuota; }
 	static inline auto& lastTenantModification() { return instance().lastTenantModification; }
 

@@ -137,13 +137,13 @@ public:
 				lastTraceTime = fetchStartTime;
 			}
 
-			state std::vector<TenantGroupName> groups;
+			state std::vector<int64_t> groups;
 			for (const auto& [group, storage] : tenantCache->tenantStorageMap) {
 				groups.push_back(group);
 			}
 			state int i;
 			for (i = 0; i < groups.size(); i++) {
-				state TenantGroupName group = groups[i];
+				state int64_t group = groups[i];
 				state int64_t usage = 0;
 				// `tenants` needs to be a copy so that the erase (below) or inserts/erases from other
 				// functions (when this actor yields) do not interfere with the iteration
@@ -195,15 +195,16 @@ public:
 		loop {
 			try {
 				tr->setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
-				state KeyBackedRangeResult<std::pair<TenantGroupName, int64_t>> currentQuotas =
+				state KeyBackedRangeResult<std::pair<int64_t, int64_t>> currentQuotas =
 				    wait(TenantMetadata::storageQuota().getRange(tr, {}, {}, CLIENT_KNOBS->MAX_TENANTS_PER_CLUSTER));
 				// Reset the quota for all groups; this essentially sets the quota to `max` for groups where the
 				// quota might have been cleared (i.e., groups that will not be returned in `getRange` request above).
+				// FIXME
 				for (auto& [group, storage] : tenantCache->tenantStorageMap) {
 					storage.quota = std::numeric_limits<int64_t>::max();
 				}
-				for (const auto& [groupName, quota] : currentQuotas.results) {
-					tenantCache->tenantStorageMap[groupName].quota = quota;
+				for (const auto& [groupId, quota] : currentQuotas.results) {
+					tenantCache->tenantStorageMap[groupId].quota = quota;
 				}
 				tr->reset();
 				wait(delay(SERVER_KNOBS->TENANT_CACHE_STORAGE_QUOTA_REFRESH_INTERVAL));

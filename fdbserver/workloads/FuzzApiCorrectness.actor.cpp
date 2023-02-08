@@ -239,12 +239,25 @@ struct FuzzApiCorrectnessWorkload : TestWorkload {
 		Reference<IDatabase> db = wait(unsafeThreadFutureToFuture(ThreadSafeDatabase::createFromExistingDatabase(cx)));
 		self->db = db;
 
-		std::vector<Future<Void>> tenantFutures;
+		state std::vector<Future<Optional<TenantGroupEntry>>> tenantGroupFutures;
+		for (int i = 0; i < self->numTenants; ++i) {
+			Optional<TenantGroupName> tenantGroup = self->getTenantGroup(i);
+			if (tenantGroup.present()) {
+				tenantGroupFutures.push_back(TenantAPI::createTenantGroup(cx.getReference(), tenantGroup.get()));
+			} else {
+				tenantGroupFutures.push_back(Optional<TenantGroupEntry>());
+			}
+		}
+		wait(waitForAll(tenantGroupFutures));
+
 		// The last tenant will not be created
+		std::vector<Future<Void>> tenantFutures;
 		for (int i = 0; i < self->numTenants; ++i) {
 			TenantName tenantName = getTenant(i);
 			TenantMapEntry entry;
-			entry.tenantGroup = self->getTenantGroup(i);
+			if (tenantGroupFutures[i].get().present()) {
+				entry.tenantGroup = tenantGroupFutures[i].get().get().id;
+			}
 			tenantFutures.push_back(::success(TenantAPI::createTenant(cx.getReference(), tenantName, entry)));
 			self->createdTenants.insert(tenantName);
 		}

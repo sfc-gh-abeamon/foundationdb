@@ -37,7 +37,7 @@ struct Storage {
 	int64_t usage = 0;
 	std::unordered_set<int64_t> tenants;
 };
-typedef std::unordered_map<TenantGroupName, Storage> TenantStorageMap;
+typedef std::unordered_map<int64_t, Storage> TenantStorageMap;
 
 struct TenantCacheTenantCreated {
 	KeyRange keys;
@@ -57,7 +57,7 @@ private:
 	uint64_t generation;
 	TenantMapByPrefix tenantCache;
 
-	// Map from tenant group names to the list of tenants, cumumlative storage used by
+	// Map from tenant group IDs to the list of tenants, cumumlative storage used by
 	// all the tenants in the group, and its storage quota.
 	TenantStorageMap tenantStorageMap;
 

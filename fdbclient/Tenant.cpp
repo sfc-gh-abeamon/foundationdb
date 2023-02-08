@@ -134,7 +134,7 @@ TenantMapEntry::TenantMapEntry(int64_t id, TenantName tenantName, TenantState te
 TenantMapEntry::TenantMapEntry(int64_t id,
                                TenantName tenantName,
                                TenantState tenantState,
-                               Optional<TenantGroupName> tenantGroup)
+                               Optional<int64_t> tenantGroup)
   : tenantName(tenantName), tenantState(tenantState), tenantGroup(tenantGroup) {
 	setId(id);
 }
@@ -156,7 +156,8 @@ std::string TenantMapEntry::toJson() const {
 		tenantEntry["assigned_cluster"] = binaryToJson(assignedCluster.get());
 	}
 	if (tenantGroup.present()) {
-		tenantEntry["tenant_group"] = binaryToJson(tenantGroup.get());
+		// FIXME: fetch group name
+		tenantEntry["tenant_group"] = tenantGroup.get();
 	}
 
 	return json_spirit::write_string(json_spirit::mValue(tenantEntry));
@@ -168,7 +169,7 @@ bool TenantMapEntry::matchesConfiguration(TenantMapEntry const& other) const {
 
 void TenantMapEntry::configure(Standalone<StringRef> parameter, Optional<Value> value) {
 	if (parameter == "tenant_group"_sr) {
-		tenantGroup = value;
+		// Ignored here, tenant groups are updated through a separate mechanism
 	} else if (parameter == "assigned_cluster"_sr) {
 		assignedCluster = value;
 	} else {
@@ -179,11 +180,23 @@ void TenantMapEntry::configure(Standalone<StringRef> parameter, Optional<Value> 
 
 json_spirit::mObject TenantGroupEntry::toJson() const {
 	json_spirit::mObject tenantGroupEntry;
+	tenantGroupEntry["id"] = id;
+	tenantGroupEntry["name"] = binaryToJson(name);
+	tenantGroupEntry["group_state"] = TenantMapEntry::tenantStateToString(groupState);
 	if (assignedCluster.present()) {
 		tenantGroupEntry["assigned_cluster"] = binaryToJson(assignedCluster.get());
 	}
 
 	return tenantGroupEntry;
+}
+
+void TenantGroupEntry::configure(Standalone<StringRef> parameter, Optional<Value> value) {
+	if (parameter == "assigned_cluster"_sr) {
+		assignedCluster = value;
+	} else {
+		TraceEvent(SevWarnAlways, "UnknownTenantGroupConfigurationParameter").detail("Parameter", parameter);
+		throw invalid_tenant_configuration();
+	}
 }
 
 TenantMetadataSpecification& TenantMetadata::instance() {

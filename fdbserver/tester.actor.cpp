@@ -1907,14 +1907,21 @@ ACTOR Future<Void> runTests(Reference<AsyncVar<Optional<struct ClusterController
 	}
 
 	if (useDB) {
-		std::vector<Future<Void>> tenantFutures;
-		for (auto tenant : tenantsToCreate) {
-			TenantMapEntry entry;
+		state std::vector<Future<Void>> tenantFutures;
+		state int tenantIndex;
+		for (tenantIndex = 0; tenantIndex < tenantsToCreate.size(); ++tenantIndex) {
+			state TenantMapEntry entry;
 			if (deterministicRandom()->coinflip()) {
-				entry.tenantGroup = "TestTenantGroup"_sr;
+				Optional<TenantGroupEntry> groupEntry =
+				    wait(TenantAPI::createTenantGroup(cx.getReference(), "TestTenantGroup"_sr));
+				ASSERT(groupEntry.present());
+				entry.tenantGroup = groupEntry.get().id;
 			}
-			TraceEvent("CreatingTenant").detail("Tenant", tenant).detail("TenantGroup", entry.tenantGroup);
-			tenantFutures.push_back(success(TenantAPI::createTenant(cx.getReference(), tenant, entry)));
+			TraceEvent("CreatingTenant")
+			    .detail("Tenant", tenantsToCreate[tenantIndex])
+			    .detail("TenantGroup", entry.tenantGroup);
+			tenantFutures.push_back(
+			    success(TenantAPI::createTenant(cx.getReference(), tenantsToCreate[tenantIndex], entry)));
 		}
 
 		wait(waitForAll(tenantFutures));

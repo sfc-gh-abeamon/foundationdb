@@ -444,7 +444,6 @@ struct MetaclusterManagementWorkload : TestWorkload {
 
 		state TenantMapEntry tenantMapEntry;
 		tenantMapEntry.tenantName = tenant;
-		tenantMapEntry.tenantGroup = tenantGroup;
 
 		try {
 			loop {
@@ -456,8 +455,8 @@ struct MetaclusterManagementWorkload : TestWorkload {
 							originalPreferredCluster = tenantMapEntry.assignedCluster.get();
 						}
 					}
-					Future<Void> createFuture =
-					    MetaclusterAPI::createTenant(self->managementDb, tenantMapEntry, assignClusterAutomatically);
+					Future<Void> createFuture = MetaclusterAPI::createTenant(
+					    self->managementDb, tenantMapEntry, tenantGroup, assignClusterAutomatically);
 					Optional<Void> result = wait(timeout(createFuture, deterministicRandom()->randomInt(1, 30)));
 					if (result.present()) {
 						break;
@@ -487,12 +486,23 @@ struct MetaclusterManagementWorkload : TestWorkload {
 				}
 			}
 
-			TenantMapEntry entry = wait(MetaclusterAPI::getTenant(self->managementDb, tenant));
+			state TenantMapEntry entry = wait(MetaclusterAPI::getTenant(self->managementDb, tenant));
+			state Optional<TenantGroupEntry> groupEntry;
+			if (tenantGroup.present()) {
+				wait(store(groupEntry, MetaclusterAPI::tryGetTenantGroup(self->managementDb, tenantGroup.get())));
+			}
 
 			ASSERT(!exists);
 			ASSERT(hasCapacity);
 			ASSERT(entry.assignedCluster.present());
-			ASSERT(entry.tenantGroup == tenantGroup);
+			ASSERT(groupEntry.present() == tenantGroup.present());
+			if (tenantGroup.present()) {
+				ASSERT(groupEntry.get().name == tenantGroup.get());
+				ASSERT(entry.tenantGroup.present());
+				ASSERT_EQ(groupEntry.get().id, entry.tenantGroup.get());
+			} else {
+				ASSERT(!entry.tenantGroup.present());
+			}
 
 			if (tenantGroup.present()) {
 				auto tenantGroupData =
@@ -522,6 +532,9 @@ struct MetaclusterManagementWorkload : TestWorkload {
 		} catch (Error& e) {
 			if (e.code() == error_code_tenant_already_exists) {
 				ASSERT(exists);
+				return Void();
+			} else if (e.code() == error_code_tenant_group_not_found) {
+				// TODO: assert that the group does not exist
 				return Void();
 			} else if (e.code() == error_code_metacluster_no_capacity) {
 				ASSERT(!hasCapacity && !exists);
@@ -708,6 +721,9 @@ struct MetaclusterManagementWorkload : TestWorkload {
 			if (e.code() == error_code_tenant_not_found) {
 				ASSERT(!exists);
 				return Void();
+			} else if (e.code() == error_code_tenant_group_not_found) {
+				// TODO: check if tenant group doesn't exist
+				return Void();
 			} else if (e.code() == error_code_cluster_no_capacity) {
 				ASSERT(exists && !hasCapacity);
 				return Void();
@@ -766,11 +782,16 @@ struct MetaclusterManagementWorkload : TestWorkload {
 			Optional<TenantMapEntry> oldEntry = wait(MetaclusterAPI::tryGetTenant(self->managementDb, tenant));
 			ASSERT(!oldEntry.present());
 
-			TenantMapEntry newEntry = wait(MetaclusterAPI::getTenant(self->managementDb, newTenantName));
+			state TenantMapEntry newEntry = wait(MetaclusterAPI::getTenant(self->managementDb, newTenantName));
+			state Optional<TenantGroupEntry> groupEntry;
+			if (newEntry.tenantGroup.present()) {
+				wait(store(groupEntry,
+				           MetaclusterAPI::tryGetTenantGroup(self->managementDb, newEntry.tenantGroup.get())));
+			}
 
 			auto tenantData = self->createdTenants.find(tenant);
 			ASSERT(tenantData != self->createdTenants.end());
-			ASSERT(tenantData->second.tenantGroup == newEntry.tenantGroup);
+			ASSERT(tenantData->second.tenantGroup == groupEntry.map(&TenantGroupEntry::name));
 			ASSERT(newEntry.assignedCluster.present() && tenantData->second.cluster == newEntry.assignedCluster.get());
 
 			self->createdTenants[newTenantName] = tenantData->second;
@@ -783,7 +804,7 @@ struct MetaclusterManagementWorkload : TestWorkload {
 			dataDb.tenants.insert(newTenantName);
 
 			if (newEntry.tenantGroup.present()) {
-				auto& tenantGroup = self->tenantGroups[newEntry.tenantGroup.get()];
+				auto& tenantGroup = self->tenantGroups[groupEntry.get().name];
 				tenantGroup.tenants.erase(tenant);
 				tenantGroup.tenants.insert(newTenantName);
 			} else {

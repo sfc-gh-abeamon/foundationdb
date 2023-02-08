@@ -51,8 +51,9 @@ private:
 		int64_t tenantCount;
 		std::set<int64_t> tenantTombstones;
 		Optional<TenantTombstoneCleanupData> tombstoneCleanupData;
-		std::map<TenantGroupName, TenantGroupEntry> tenantGroupMap;
-		std::map<TenantGroupName, std::set<int64_t>> tenantGroupIndex;
+		std::map<int64_t, TenantGroupEntry> tenantGroupMap;
+		std::map<TenantGroupName, int64_t> tenantGroupNameIndex;
+		std::map<int64_t, std::set<int64_t>> tenantGroupIndex;
 
 		std::set<int64_t> tenantsInTenantGroupIndex;
 
@@ -70,7 +71,8 @@ private:
 		state KeyBackedRangeResult<std::pair<int64_t, TenantMapEntry>> tenantList;
 		state KeyBackedRangeResult<std::pair<TenantName, int64_t>> tenantNameIndexList;
 		state KeyBackedRangeResult<int64_t> tenantTombstoneList;
-		state KeyBackedRangeResult<std::pair<TenantGroupName, TenantGroupEntry>> tenantGroupList;
+		state KeyBackedRangeResult<std::pair<int64_t, TenantGroupEntry>> tenantGroupList;
+		state KeyBackedRangeResult<std::pair<TenantGroupName, int64_t>> tenantGroupNameIndexList;
 		state KeyBackedRangeResult<Tuple> tenantGroupTenantTuples;
 		state TenantMetadataSpecification* tenantMetadata;
 
@@ -90,18 +92,20 @@ private:
 					tenantMetadata = &TenantMetadata::instance();
 				}
 
-				wait(
-				    store(tenantList, tenantMetadata->tenantMap.getRange(tr, {}, {}, metaclusterMaxTenants)) &&
-				    store(tenantNameIndexList,
-				          tenantMetadata->tenantNameIndex.getRange(tr, {}, {}, metaclusterMaxTenants)) &&
-				    store(self->metadata.lastTenantId, tenantMetadata->lastTenantId.getD(tr, Snapshot::False, -1)) &&
-				    store(self->metadata.tenantCount, tenantMetadata->tenantCount.getD(tr, Snapshot::False, 0)) &&
-				    store(tenantTombstoneList,
-				          tenantMetadata->tenantTombstones.getRange(tr, {}, {}, metaclusterMaxTenants)) &&
-				    store(self->metadata.tombstoneCleanupData, tenantMetadata->tombstoneCleanupData.get(tr)) &&
-				    store(tenantGroupTenantTuples,
-				          tenantMetadata->tenantGroupTenantIndex.getRange(tr, {}, {}, metaclusterMaxTenants)) &&
-				    store(tenantGroupList, tenantMetadata->tenantGroupMap.getRange(tr, {}, {}, metaclusterMaxTenants)));
+				wait(store(tenantList, tenantMetadata->tenantMap.getRange(tr, {}, {}, metaclusterMaxTenants)) &&
+				     store(tenantNameIndexList,
+				           tenantMetadata->tenantNameIndex.getRange(tr, {}, {}, metaclusterMaxTenants)) &&
+				     store(self->metadata.lastTenantId, tenantMetadata->lastTenantId.getD(tr, Snapshot::False, -1)) &&
+				     store(self->metadata.tenantCount, tenantMetadata->tenantCount.getD(tr, Snapshot::False, 0)) &&
+				     store(tenantTombstoneList,
+				           tenantMetadata->tenantTombstones.getRange(tr, {}, {}, metaclusterMaxTenants)) &&
+				     store(self->metadata.tombstoneCleanupData, tenantMetadata->tombstoneCleanupData.get(tr)) &&
+				     store(tenantGroupTenantTuples,
+				           tenantMetadata->tenantGroupTenantIndex.getRange(tr, {}, {}, metaclusterMaxTenants)) &&
+				     store(tenantGroupList,
+				           tenantMetadata->tenantGroupMap.getRange(tr, {}, {}, metaclusterMaxTenants)) &&
+				     store(tenantGroupNameIndexList,
+				           tenantMetadata->tenantGroupNameIndex.getRange(tr, {}, {}, metaclusterMaxTenants)));
 
 				break;
 			} catch (Error& e) {
@@ -123,18 +127,37 @@ private:
 
 		ASSERT(!tenantGroupList.more);
 		self->metadata.tenantGroupMap =
-		    std::map<TenantGroupName, TenantGroupEntry>(tenantGroupList.results.begin(), tenantGroupList.results.end());
+		    std::map<int64_t, TenantGroupEntry>(tenantGroupList.results.begin(), tenantGroupList.results.end());
+
+		ASSERT(!tenantGroupNameIndexList.more);
+		self->metadata.tenantGroupNameIndex = std::map<TenantGroupName, int64_t>(
+		    tenantGroupNameIndexList.results.begin(), tenantGroupNameIndexList.results.end());
+
+		fmt::print("Tenant groups\n");
+		for (auto t : self->metadata.tenantGroupMap) {
+			fmt::print("  {} {}\n", t.first, printable(t.second.name));
+		}
+
+		fmt::print("Tenants\n");
+		for (auto t : self->metadata.tenantMap) {
+			fmt::print("  {} {} {}\n", t.first, printable(t.second.tenantName), t.second.tenantGroup.orDefault(-1));
+		}
+
+		fmt::print("Tenant tuples\n");
+		for (auto t : tenantGroupTenantTuples.results) {
+			fmt::print("  {} {}\n", t.getInt(0), t.getInt(1));
+		}
 
 		for (auto t : tenantGroupTenantTuples.results) {
 			ASSERT_EQ(t.size(), 2);
-			TenantGroupName tenantGroupName = t.getString(0);
+			int64_t tenantGroupId = t.getInt(0);
 			int64_t tenantId = t.getInt(1);
-			ASSERT(self->metadata.tenantGroupMap.count(tenantGroupName));
+			ASSERT(self->metadata.tenantGroupMap.count(tenantGroupId));
 			ASSERT(self->metadata.tenantMap.count(tenantId));
-			self->metadata.tenantGroupIndex[tenantGroupName].insert(tenantId);
+			self->metadata.tenantGroupIndex[tenantGroupId].insert(tenantId);
 			ASSERT(self->metadata.tenantsInTenantGroupIndex.insert(tenantId).second);
 		}
-		ASSERT_EQ(self->metadata.tenantGroupIndex.size(), self->metadata.tenantGroupMap.size());
+		ASSERT_LE(self->metadata.tenantGroupIndex.size(), self->metadata.tenantGroupMap.size());
 
 		return Void();
 	}
@@ -187,6 +210,23 @@ private:
 		}
 
 		ASSERT_EQ(metadata.tenantMap.size() + renameCount, metadata.tenantNameIndex.size());
+
+		fmt::print("{}\n", clusterTypeToString(metadata.clusterType));
+		fmt::print("Tenant Group Map:\n");
+		for (auto t : metadata.tenantGroupMap) {
+			fmt::print("  {}: {}\n", t.first, printable(t.second.name));
+		}
+		fmt::print("Tenant Group Name Index:\n");
+		for (auto t : metadata.tenantGroupNameIndex) {
+			fmt::print("  {}: {}\n", printable(t.first), t.second);
+		}
+		ASSERT_EQ(metadata.tenantGroupMap.size(), metadata.tenantGroupNameIndex.size());
+		for (auto const& [id, tenantGroupEntry] : metadata.tenantGroupMap) {
+			ASSERT_EQ(id, tenantGroupEntry.id);
+			auto itr = metadata.tenantGroupNameIndex.find(tenantGroupEntry.name);
+			ASSERT(itr != metadata.tenantNameIndex.end());
+			ASSERT_EQ(itr->second, id);
+		}
 	}
 
 	// Check that the tenant tombstones are properly cleaned up and only present on a metacluster data cluster

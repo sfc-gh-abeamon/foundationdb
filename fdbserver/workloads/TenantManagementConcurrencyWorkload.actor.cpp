@@ -53,7 +53,7 @@ struct TenantManagementConcurrencyWorkload : TestWorkload {
 
 	TenantManagementConcurrencyWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
 		maxTenants = std::min<int>(1e8 - 1, getOption(options, "maxTenants"_sr, 100));
-		maxTenantGroups = std::min<int>(2 * maxTenants, getOption(options, "maxTenantGroups"_sr, 20));
+		maxTenantGroups = std::min<int>(2 * maxTenants, getOption(options, "maxTenantGroups"_sr, 5));
 		testDuration = getOption(options, "testDuration"_sr, 120.0);
 
 		if (clientId == 0) {
@@ -148,6 +148,8 @@ struct TenantManagementConcurrencyWorkload : TestWorkload {
 			self->dataDb = cx;
 		}
 
+		fmt::print("Running (metacluster?): {}\n", self->useMetacluster);
+
 		return Void();
 	}
 
@@ -158,9 +160,9 @@ struct TenantManagementConcurrencyWorkload : TestWorkload {
 		return tenant;
 	}
 
-	Optional<TenantGroupName> chooseTenantGroup() {
+	Optional<TenantGroupName> chooseTenantGroup(bool requireGroup = false) {
 		Optional<TenantGroupName> tenantGroup;
-		if (deterministicRandom()->coinflip()) {
+		if (requireGroup || deterministicRandom()->coinflip()) {
 			tenantGroup =
 			    TenantGroupNameRef(format("tenantgroup%08d", deterministicRandom()->randomInt(0, maxTenantGroups)));
 		}
@@ -172,14 +174,14 @@ struct TenantManagementConcurrencyWorkload : TestWorkload {
 		state TenantName tenant = self->chooseTenantName();
 		state TenantMapEntry entry;
 		entry.tenantName = tenant;
-		entry.tenantGroup = self->chooseTenantGroup();
+		state Optional<TenantGroupName> tenantGroup = self->chooseTenantGroup();
 
 		try {
 			loop {
 				Future<Void> createFuture =
 				    self->useMetacluster
-				        ? MetaclusterAPI::createTenant(self->mvDb, entry, AssignClusterAutomatically::True)
-				        : success(TenantAPI::createTenant(self->dataDb.getReference(), tenant, entry));
+				        ? MetaclusterAPI::createTenant(self->mvDb, entry, tenantGroup, AssignClusterAutomatically::True)
+				        : success(TenantAPI::createTenant(self->dataDb.getReference(), tenant, entry, tenantGroup));
 				Optional<Void> result = wait(timeout(createFuture, 30));
 				if (result.present()) {
 					break;
@@ -190,7 +192,8 @@ struct TenantManagementConcurrencyWorkload : TestWorkload {
 		} catch (Error& e) {
 			if (e.code() == error_code_tenant_removed) {
 				ASSERT(self->useMetacluster);
-			} else if (e.code() != error_code_tenant_already_exists && e.code() != error_code_cluster_no_capacity) {
+			} else if (e.code() != error_code_tenant_already_exists && e.code() != error_code_tenant_group_not_found &&
+			           e.code() != error_code_cluster_no_capacity && e.code() != error_code_tenant_group_removed) {
 				TraceEvent(SevError, "CreateTenantFailure").error(e).detail("TenantName", tenant);
 				ASSERT(false);
 			}
@@ -218,6 +221,7 @@ struct TenantManagementConcurrencyWorkload : TestWorkload {
 		} catch (Error& e) {
 			if (e.code() != error_code_tenant_not_found) {
 				TraceEvent(SevError, "DeleteTenantFailure").error(e).detail("TenantName", tenant);
+				ASSERT(false);
 			}
 			return Void();
 		}
@@ -233,10 +237,24 @@ struct TenantManagementConcurrencyWorkload : TestWorkload {
 			loop {
 				try {
 					tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
-					TenantMapEntry entry = wait(TenantAPI::getTenantTransaction(tr, tenant));
-					TenantMapEntry updatedEntry = entry;
-					for (auto param : configParams) {
-						updatedEntry.configure(param.first, param.second);
+					state TenantMapEntry entry = wait(TenantAPI::getTenantTransaction(tr, tenant));
+					state TenantMapEntry updatedEntry = entry;
+
+					state std::map<Standalone<StringRef>, Optional<Value>>::iterator configItr;
+					for (configItr = configParams.begin(); configItr != configParams.end(); ++configItr) {
+						if (configItr->first == "tenant_group"_sr) {
+							if (configItr->second.present()) {
+								Optional<int64_t> groupId =
+								    wait(TenantMetadata::tenantGroupNameIndex().get(tr, configItr->second.get()));
+								if (!groupId.present()) {
+									throw tenant_group_not_found();
+								}
+								updatedEntry.tenantGroup = groupId.get();
+							} else {
+								updatedEntry.tenantGroup = Optional<int64_t>();
+							}
+						}
+						updatedEntry.configure(configItr->first, configItr->second);
 					}
 					wait(TenantAPI::configureTenantTransaction(tr, entry, updatedEntry));
 					wait(buggifiedCommit(tr, BUGGIFY_WITH_PROB(0.1)));
@@ -266,8 +284,10 @@ struct TenantManagementConcurrencyWorkload : TestWorkload {
 
 			return Void();
 		} catch (Error& e) {
-			if (e.code() != error_code_tenant_not_found && e.code() != error_code_invalid_tenant_state) {
+			if (e.code() != error_code_tenant_not_found && e.code() != error_code_tenant_group_not_found &&
+			    e.code() != error_code_invalid_tenant_state) {
 				TraceEvent(SevError, "ConfigureTenantFailure").error(e).detail("TenantName", tenant);
+				ASSERT(false);
 			}
 			return Void();
 		}
@@ -299,6 +319,62 @@ struct TenantManagementConcurrencyWorkload : TestWorkload {
 				    .error(e)
 				    .detail("OldTenant", oldTenant)
 				    .detail("NewTenant", newTenant);
+				ASSERT(false);
+			}
+			return Void();
+		}
+	}
+
+	ACTOR static Future<Void> createTenantGroup(TenantManagementConcurrencyWorkload* self) {
+		state TenantGroupEntry groupEntry;
+		groupEntry.name = self->chooseTenantGroup(true).get();
+
+		try {
+			loop {
+				Future<Void> createTenantGroupFuture =
+				    self->useMetacluster
+				        ? MetaclusterAPI::createTenantGroup(self->mvDb, groupEntry, AssignClusterAutomatically::True)
+				        : success(TenantAPI::createTenantGroup(self->dataDb.getReference(), groupEntry.name));
+				Optional<Void> result = wait(timeout(createTenantGroupFuture, 30));
+
+				if (result.present()) {
+					break;
+				}
+			}
+
+			return Void();
+		} catch (Error& e) {
+			if (e.code() == error_code_tenant_group_removed) {
+				ASSERT(self->useMetacluster);
+			} else if (e.code() != error_code_tenant_group_already_exists) {
+				TraceEvent(SevError, "CreateTenantGroupFailure").error(e).detail("TenantGroupName", groupEntry.name);
+				ASSERT(false);
+			}
+			return Void();
+		}
+	}
+
+	ACTOR static Future<Void> deleteTenantGroup(TenantManagementConcurrencyWorkload* self) {
+		state TenantGroupName groupName = self->chooseTenantGroup(true).get();
+
+		try {
+			loop {
+				Future<Void> deleteTenantGroupFuture =
+				    self->useMetacluster
+				        ? MetaclusterAPI::deleteTenantGroup(self->mvDb, groupName)
+				        : success(TenantAPI::deleteTenantGroup(self->dataDb.getReference(), groupName));
+				Optional<Void> result = wait(timeout(deleteTenantGroupFuture, 30));
+
+				if (result.present()) {
+					break;
+				}
+			}
+
+			return Void();
+		} catch (Error& e) {
+			if (e.code() != error_code_tenant_group_not_found && e.code() != error_code_tenant_group_not_empty) {
+				TraceEvent(SevError, "DeleteTenantGroupFailure").error(e).detail("TenantGroupName", groupName);
+				ASSERT(false);
 			}
 			return Void();
 		}
@@ -310,7 +386,7 @@ struct TenantManagementConcurrencyWorkload : TestWorkload {
 
 		// Run a random sequence of tenant management operations for the duration of the test
 		while (now() < start + self->testDuration) {
-			state int operation = deterministicRandom()->randomInt(0, 4);
+			state int operation = deterministicRandom()->randomInt(0, 6);
 			if (operation == 0) {
 				wait(createTenant(self));
 			} else if (operation == 1) {
@@ -319,6 +395,10 @@ struct TenantManagementConcurrencyWorkload : TestWorkload {
 				wait(configureTenant(self));
 			} else if (operation == 3) {
 				wait(renameTenant(self));
+			} else if (operation == 4) {
+				wait(createTenantGroup(self));
+			} else if (operation == 5) {
+				wait(deleteTenantGroup(self));
 			}
 		}
 

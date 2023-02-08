@@ -82,8 +82,9 @@ struct StorageQuotaWorkload : TestWorkload {
 	ACTOR Future<Void> _start(StorageQuotaWorkload* self, Database cx) {
 		state TenantMapEntry entry1 = wait(TenantAPI::getTenant(cx.getReference(), self->tenantName));
 		state TenantMapEntry entry2 = wait(TenantAPI::getTenant(cx.getReference(), self->emptyTenantName));
-		ASSERT(entry1.tenantGroup.present() && entry1.tenantGroup.get() == self->group &&
-		       entry2.tenantGroup.present() && entry2.tenantGroup.get() == self->group);
+		ASSERT(entry1.tenantGroup.present() && entry1.tenantGroup == entry2.tenantGroup);
+
+		state int64_t tenantGroupId = entry1.tenantGroup.get();
 
 		// Get the size of the non-empty tenant. We will set the quota of the tenant group
 		// to just below the current size of this tenant.
@@ -91,8 +92,8 @@ struct StorageQuotaWorkload : TestWorkload {
 		state int64_t quota = size - 1;
 
 		// Check that the quota set/get functions work as expected.
-		wait(setStorageQuota(cx, self->group, quota));
-		state Optional<int64_t> quotaRead = wait(getStorageQuota(cx, self->group));
+		wait(setStorageQuota(cx, tenantGroupId, quota));
+		state Optional<int64_t> quotaRead = wait(getStorageQuota(cx, tenantGroupId));
 		ASSERT(quotaRead.present() && quotaRead.get() == quota);
 
 		if (!SERVER_KNOBS->STORAGE_QUOTA_ENABLED) {
@@ -112,9 +113,9 @@ struct StorageQuotaWorkload : TestWorkload {
 		// Increase the quota or clear the quota. Check that writes to both the tenants are now able to commit.
 		if (deterministicRandom()->coinflip()) {
 			quota = size * 2;
-			wait(setStorageQuota(cx, self->group, quota));
+			wait(setStorageQuota(cx, tenantGroupId, quota));
 		} else {
-			wait(clearStorageQuota(cx, self->group));
+			wait(clearStorageQuota(cx, tenantGroupId));
 		}
 		state bool committed1 = wait(tryWrite(self, cx, self->tenant, /*bypassQuota=*/false, /*expectOk=*/true));
 		ASSERT(committed1);
@@ -147,29 +148,29 @@ struct StorageQuotaWorkload : TestWorkload {
 		}
 	}
 
-	static Future<Void> setStorageQuota(Database cx, TenantGroupName tenantGroupName, int64_t quota) {
-		return runRYWTransactionVoid(cx,
-		                             [tenantGroupName = tenantGroupName,
-		                              quota = quota](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
-			                             tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
-			                             TenantMetadata::storageQuota().set(tr, tenantGroupName, quota);
-			                             return Void();
-		                             });
-	}
-
-	static Future<Void> clearStorageQuota(Database cx, TenantGroupName tenantGroupName) {
+	static Future<Void> setStorageQuota(Database cx, int64_t tenantGroupId, int64_t quota) {
 		return runRYWTransactionVoid(
-		    cx, [tenantGroupName = tenantGroupName](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
+		    cx,
+		    [tenantGroupId = tenantGroupId, quota = quota](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
 			    tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
-			    TenantMetadata::storageQuota().erase(tr, tenantGroupName);
+			    TenantMetadata::storageQuota().set(tr, tenantGroupId, quota);
 			    return Void();
 		    });
 	}
 
-	static Future<Optional<int64_t>> getStorageQuota(Database cx, TenantGroupName tenantGroupName) {
-		return runRYWTransaction(cx, [tenantGroupName = tenantGroupName](Reference<ReadYourWritesTransaction> tr) {
+	static Future<Void> clearStorageQuota(Database cx, int64_t tenantGroupId) {
+		return runRYWTransactionVoid(
+		    cx, [tenantGroupId = tenantGroupId](Reference<ReadYourWritesTransaction> tr) -> Future<Void> {
+			    tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+			    TenantMetadata::storageQuota().erase(tr, tenantGroupId);
+			    return Void();
+		    });
+	}
+
+	static Future<Optional<int64_t>> getStorageQuota(Database cx, int64_t tenantGroupId) {
+		return runRYWTransaction(cx, [tenantGroupId = tenantGroupId](Reference<ReadYourWritesTransaction> tr) {
 			tr->setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
-			return TenantMetadata::storageQuota().get(tr, tenantGroupName);
+			return TenantMetadata::storageQuota().get(tr, tenantGroupId);
 		});
 	}
 

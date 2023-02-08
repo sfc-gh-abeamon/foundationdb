@@ -36,6 +36,146 @@
 
 namespace fdb_cli {
 
+Optional<std::map<Standalone<StringRef>, Optional<Value>>>
+parseTenantGroupConfiguration(std::vector<StringRef> const& tokens, int startIndex, bool allowUnset) {
+	std::map<Standalone<StringRef>, Optional<Value>> configParams;
+	for (int tokenNum = startIndex; tokenNum < tokens.size(); ++tokenNum) {
+		Optional<Value> value;
+
+		StringRef token = tokens[tokenNum];
+		StringRef param;
+		if (allowUnset && token == "unset"_sr) {
+			if (++tokenNum == tokens.size()) {
+				fmt::print(stderr, "ERROR: `unset' specified without a configuration parameter.\n");
+				return {};
+			}
+			param = tokens[tokenNum];
+		} else {
+			bool foundEquals;
+			param = token.eat("=", &foundEquals);
+			if (!foundEquals) {
+				fmt::print(stderr,
+				           "ERROR: invalid configuration string `{}'. String must specify a value using `='.\n",
+				           param.toString().c_str());
+				return {};
+			}
+			value = token;
+		}
+
+		if (configParams.count(param)) {
+			fmt::print(
+			    stderr, "ERROR: configuration parameter `{}' specified more than once.\n", param.toString().c_str());
+			return {};
+		}
+
+		if (tokencmp(param, "assigned_cluster")) {
+			configParams[param] = value;
+		} else {
+			fmt::print(stderr, "ERROR: unrecognized configuration parameter `{}'.\n", param.toString().c_str());
+			return {};
+		}
+	}
+
+	return configParams;
+}
+
+// tenantgroup create command
+ACTOR Future<bool> tenantGroupCreateCommand(Reference<IDatabase> db, std::vector<StringRef> tokens) {
+	if (tokens.size() < 3 || tokens.size() > 4) {
+		fmt::print("Usage: tenantgroup create <NAME> [assigned_cluster=<CLUSTER_NAME>]\n\n");
+		fmt::print("Creates a new tenant group in the cluster with the specified name.\n");
+		fmt::print("An optional cluster name can be specified that this tenant group will be placed in.\n");
+		return false;
+	}
+
+	state Reference<ITransaction> tr = db->createTransaction();
+	state bool doneExistenceCheck = false;
+
+	state Optional<std::map<Standalone<StringRef>, Optional<Value>>> configuration =
+	    parseTenantGroupConfiguration(tokens, 3, false);
+
+	if (!configuration.present()) {
+		return false;
+	}
+
+	loop {
+		try {
+			tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+			state ClusterType clusterType = wait(TenantAPI::getClusterType(tr));
+			state TenantGroupEntry groupEntry;
+			groupEntry.name = tokens[2];
+			AssignClusterAutomatically assignClusterAutomatically = AssignClusterAutomatically::True;
+
+			for (auto const& [name, value] : configuration.get()) {
+				if (name == "assigned_cluster"_sr) {
+					assignClusterAutomatically = AssignClusterAutomatically::False;
+					groupEntry.configure(name, value);
+				}
+			}
+
+			if (clusterType == ClusterType::METACLUSTER_MANAGEMENT) {
+				wait(MetaclusterAPI::createTenantGroup(db, groupEntry, assignClusterAutomatically));
+			} else {
+				if (!doneExistenceCheck) {
+					Optional<int64_t> tenantGroupId = wait(TenantMetadata::tenantGroupNameIndex().get(tr, tokens[2]));
+					if (tenantGroupId.present()) {
+						throw tenant_group_already_exists();
+					}
+					doneExistenceCheck = true;
+				}
+
+				int64_t nextId = wait(TenantAPI::getNextTenantId(tr));
+				TenantMetadata::lastTenantId().set(tr, nextId);
+
+				wait(success(TenantAPI::createTenantGroupTransaction(tr, groupEntry)));
+				wait(safeThreadFutureToFuture(tr->commit()));
+			}
+
+			return true;
+		} catch (Error& e) {
+			wait(safeThreadFutureToFuture(tr->onError(e)));
+		}
+	}
+}
+
+// tenantgroup delete command
+ACTOR Future<bool> tenantGroupDeleteCommand(Reference<IDatabase> db, std::vector<StringRef> tokens) {
+	if (tokens.size() != 3) {
+		fmt::print("Usage: tenantgroup delete <NAME>\n\n");
+		fmt::print("Deletes a tenant group from the cluster by name.\n");
+		fmt::print("Deletion will be allowed only if the specified tenant group contains no tenants.\n");
+		return false;
+	}
+
+	state Reference<ITransaction> tr = db->createTransaction();
+	state Optional<int64_t> tenantGroupId;
+
+	loop {
+		try {
+			tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+			state ClusterType clusterType = wait(TenantAPI::getClusterType(tr));
+			if (clusterType == ClusterType::METACLUSTER_MANAGEMENT) {
+				wait(MetaclusterAPI::deleteTenant(db, tokens[2]));
+			} else {
+				wait(safeThreadFutureToFuture(tr->commit()));
+				if (!tenantGroupId.present()) {
+					wait(store(tenantGroupId, TenantMetadata::tenantGroupNameIndex().get(tr, tokens[2])));
+					if (!tenantGroupId.present()) {
+						throw tenant_not_found();
+					}
+				}
+
+				wait(TenantAPI::deleteTenantGroupTransaction(tr, tenantGroupId.get()));
+				wait(safeThreadFutureToFuture(tr->commit()));
+			}
+
+			return true;
+		} catch (Error& e) {
+			wait(safeThreadFutureToFuture(tr->onError(e)));
+		}
+	}
+}
+
 // tenantgroup list command
 ACTOR Future<bool> tenantGroupListCommand(Reference<IDatabase> db, std::vector<StringRef> tokens) {
 	if (tokens.size() > 5) {
@@ -75,7 +215,7 @@ ACTOR Future<bool> tenantGroupListCommand(Reference<IDatabase> db, std::vector<S
 			tr->setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
 			state ClusterType clusterType = wait(TenantAPI::getClusterType(tr));
 			state std::vector<TenantGroupName> tenantGroupNames;
-			state std::vector<std::pair<TenantGroupName, TenantGroupEntry>> tenantGroups;
+			state std::vector<std::pair<TenantGroupName, int64_t>> tenantGroups;
 			if (clusterType == ClusterType::METACLUSTER_MANAGEMENT) {
 				wait(store(tenantGroups,
 				           MetaclusterAPI::listTenantGroupsTransaction(tr, beginTenantGroup, endTenantGroup, limit)));
@@ -192,6 +332,10 @@ Future<bool> tenantGroupCommand(Reference<IDatabase> db, std::vector<StringRef> 
 	if (tokens.size() == 1) {
 		printUsage(tokens[0]);
 		return true;
+	} else if (tokencmp(tokens[1], "create")) {
+		return tenantGroupCreateCommand(db, tokens);
+	} else if (tokencmp(tokens[1], "delete")) {
+		return tenantGroupDeleteCommand(db, tokens);
 	} else if (tokencmp(tokens[1], "list")) {
 		return tenantGroupListCommand(db, tokens);
 	} else if (tokencmp(tokens[1], "get")) {
@@ -207,7 +351,7 @@ void tenantGroupGenerator(const char* text,
                           std::vector<std::string>& lc,
                           std::vector<StringRef> const& tokens) {
 	if (tokens.size() == 1) {
-		const char* opts[] = { "list", "get", nullptr };
+		const char* opts[] = { "create", "delete", "list", "get", nullptr };
 		arrayGenerator(text, line, opts, lc);
 	} else if (tokens.size() == 3 && tokencmp(tokens[1], "get")) {
 		const char* opts[] = { "JSON", nullptr };
@@ -217,7 +361,13 @@ void tenantGroupGenerator(const char* text,
 
 std::vector<const char*> tenantGroupHintGenerator(std::vector<StringRef> const& tokens, bool inArgument) {
 	if (tokens.size() == 1) {
-		return { "<list|get>", "[ARGS]" };
+		return { "<create|delete|list|get>", "[ARGS]" };
+	} else if (tokencmp(tokens[1], "create") && tokens.size() < 4) {
+		static std::vector<const char*> opts = { "<NAME>", "[assigned_cluster=<CLUSTER_NAME>]" };
+		return std::vector<const char*>(opts.begin() + tokens.size() - 2, opts.end());
+	} else if (tokencmp(tokens[1], "delete") && tokens.size() < 3) {
+		static std::vector<const char*> opts = { "<NAME>" };
+		return std::vector<const char*>(opts.begin() + tokens.size() - 2, opts.end());
 	} else if (tokencmp(tokens[1], "list") && tokens.size() < 5) {
 		static std::vector<const char*> opts = { "[BEGIN]", "[END]", "[LIMIT]" };
 		return std::vector<const char*>(opts.begin() + tokens.size() - 2, opts.end());
@@ -229,12 +379,14 @@ std::vector<const char*> tenantGroupHintGenerator(std::vector<StringRef> const& 
 	}
 }
 
-CommandFactory tenantGroupRegisterFactory("tenantgroup",
-                                          CommandHelp("tenantgroup <list|get> [ARGS]",
-                                                      "view tenant group information",
-                                                      "`list' prints a list of tenant groups in the cluster.\n"
-                                                      "`get' prints the metadata for a particular tenant group.\n"),
-                                          &tenantGroupGenerator,
-                                          &tenantGroupHintGenerator);
+CommandFactory tenantGroupRegisterFactory(
+    "tenantgroup",
+    CommandHelp("tenantgroup <create|delete|list|get> [ARGS]",
+                "view and manage tenant groups in a cluster or metacluster",
+                "`create' and `delete' add and remove tenant groups from the cluster.\n"
+                "`list' prints a list of tenant groups in the cluster.\n"
+                "`get' prints the metadata for a particular tenant group.\n"),
+    &tenantGroupGenerator,
+    &tenantGroupHintGenerator);
 
 } // namespace fdb_cli

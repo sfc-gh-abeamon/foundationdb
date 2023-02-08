@@ -62,7 +62,13 @@ ACTOR Future<Void> getQuota(Reference<IDatabase> db, TransactionTag tag, QuotaTy
 		tr->setOption(FDBTransactionOptions::READ_SYSTEM_KEYS);
 		try {
 			if (quotaType == QuotaType::STORAGE) {
-				Optional<int64_t> value = wait(TenantMetadata::storageQuota().get(tr, tag));
+				Optional<int64_t> tenantGroupId = wait(TenantMetadata::tenantGroupNameIndex().get(tr, tag));
+				if (!tenantGroupId.present()) {
+					throw tenant_group_not_found();
+				}
+
+				Optional<int64_t> value = wait(TenantMetadata::storageQuota().get(tr, tenantGroupId.get()));
+
 				if (value.present()) {
 					fmt::print("{}\n", value.get());
 				} else {
@@ -95,7 +101,11 @@ ACTOR Future<Void> setQuota(Reference<IDatabase> db, TransactionTag tag, QuotaTy
 		tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
 		try {
 			if (quotaType == QuotaType::STORAGE) {
-				TenantMetadata::storageQuota().set(tr, tag, value);
+				Optional<int64_t> tenantGroupId = wait(TenantMetadata::tenantGroupNameIndex().get(tr, tag));
+				if (!tenantGroupId.present()) {
+					throw tenant_group_not_found();
+				}
+				TenantMetadata::storageQuota().set(tr, tenantGroupId.get(), value);
 			} else {
 				state ThreadFuture<Optional<Value>> resultFuture = tr->get(ThrottleApi::getTagQuotaKey(tag));
 				Optional<Value> v = wait(safeThreadFutureToFuture(resultFuture));
@@ -133,7 +143,11 @@ ACTOR Future<Void> clearQuota(Reference<IDatabase> db, TransactionTag tag) {
 	loop {
 		tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
 		try {
-			TenantMetadata::storageQuota().erase(tr, tag);
+			Optional<int64_t> tenantGroupId = wait(TenantMetadata::tenantGroupNameIndex().get(tr, tag));
+			if (!tenantGroupId.present()) {
+				throw tenant_group_not_found();
+			}
+			TenantMetadata::storageQuota().erase(tr, tenantGroupId.get());
 			tr->clear(ThrottleApi::getTagQuotaKey(tag));
 			wait(safeThreadFutureToFuture(tr->commit()));
 			fmt::print("Successfully cleared quota.\n");

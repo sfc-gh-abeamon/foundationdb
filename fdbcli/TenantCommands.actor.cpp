@@ -25,6 +25,7 @@
 #include "fdbclient/IClientApi.h"
 #include "fdbclient/Knobs.h"
 #include "fdbclient/ManagementAPI.actor.h"
+#include "fdbclient/MetaclusterManagement.actor.g.h"
 #include "fdbclient/MetaclusterManagement.actor.h"
 #include "fdbclient/TenantManagement.actor.h"
 #include "fdbclient/Schemas.h"
@@ -186,15 +187,18 @@ ACTOR Future<bool> tenantCreateCommand(Reference<IDatabase> db, std::vector<Stri
 			state ClusterType clusterType = wait(TenantAPI::getClusterType(tr));
 			if (clusterType == ClusterType::METACLUSTER_MANAGEMENT) {
 				TenantMapEntry tenantEntry;
+				Optional<TenantGroupName> tenantGroup;
 				AssignClusterAutomatically assignClusterAutomatically = AssignClusterAutomatically::True;
 				for (auto const& [name, value] : configuration.get()) {
 					if (name == "assigned_cluster"_sr) {
 						assignClusterAutomatically = AssignClusterAutomatically::False;
+					} else if (name == "tenant_group"_sr) {
+						tenantGroup = value;
 					}
 					tenantEntry.configure(name, value);
 				}
 				tenantEntry.tenantName = tokens[2];
-				wait(MetaclusterAPI::createTenant(db, tenantEntry, assignClusterAutomatically));
+				wait(MetaclusterAPI::createTenant(db, tenantEntry, tenantGroup, assignClusterAutomatically));
 			} else {
 				if (!doneExistenceCheck) {
 					// Hold the reference to the standalone's memory
