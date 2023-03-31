@@ -49,11 +49,19 @@ abstract class NativeFuture<T> extends CompletableFuture<T> implements AutoClose
 	//
 	protected void registerMarshalCallback(Executor executor) {
 		if(cPtr != 0) {
-			Future_registerCallback(cPtr, () -> executor.execute(this::marshalWhenDone));
+			Future_registerCallback(cPtr, () -> {
+						long start = System.nanoTime();
+						executor.execute(this::marshalWhenDone);
+						double duration = (System.nanoTime() - start) / 1e9;
+						System.out.println("Executor.execute for callback in " + duration + " seconds");
+					}
+			);
 		}
 	}
 
 	private void marshalWhenDone() {
+		long start = System.nanoTime();
+		System.out.println("Executing callback on thread: " + Thread.currentThread().getName());
 		T val = null;
 		try {
 			boolean shouldComplete = false;
@@ -69,12 +77,18 @@ abstract class NativeFuture<T> extends CompletableFuture<T> implements AutoClose
 			}
 
 			if(shouldComplete) {
+				double duration = (System.nanoTime() - start) / 1e9;
+				System.out.println("Completing future after " + duration + " seconds");
 				complete(val);
 			}
 		} catch(FDBException t) {
 			assert(t.getCode() != 1102 && t.getCode() != 2015); // future_released, future_not_set not possible
+			double duration = (System.nanoTime() - start) / 1e9;
+			System.out.println("Completing future exceptionally after " + duration + " seconds + (" + t.getMessage() + ")");
 			completeExceptionally(t);
 		} catch(Throwable t) {
+			double duration = (System.nanoTime() - start) / 1e9;
+			System.out.println("Completing future exceptionally after " + duration + " seconds + (" + t.getMessage() + ")");
 			completeExceptionally(t);
 		} finally {
 			postMarshal(val);
